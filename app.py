@@ -150,9 +150,9 @@ def process_data(df):
         
         # Ограничение артикулов
         all_arts = df['Art'].unique()
-        if len(all_arts) > 5000:
-            st.warning("⚠️ Обрабатываем топ-5000 артикулов по продажам")
-            top_arts = df.groupby('Art')['Qty'].sum().nlargest(5000).index
+        if len(all_arts) > 20000:
+            st.warning("⚠️ Обрабатываем топ-20000 артикулов по продажам")
+            top_arts = df.groupby('Art')['Qty'].sum().nlargest(20000).index
             all_arts = top_arts
             df = df[df['Art'].isin(all_arts)]
         
