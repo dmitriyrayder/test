@@ -109,8 +109,13 @@ class OptimizedRecommenderSystem:
             st.warning("⚠️ Не удалось обработать колонку Datasales. Продолжаем без временных признаков.")
         
         return df
+    
+    def process_data(self, df):
         """Упрощенная предобработка данных"""
         df = df.copy()
+        
+        # Обработка колонки Datasales если она есть
+        df = self.process_datasales(df)
         
         # Базовая очистка
         df = df.dropna(subset=['Magazin', 'Art', 'Price', 'Qty'])
@@ -162,8 +167,8 @@ class OptimizedRecommenderSystem:
     
     def build_model(self, df, test_size=0.2):
         """Построение упрощенной модели"""
-        # Предобработка
-        df = self.preprocess_data(df)
+        # Предобработка - исправлен вызов метода
+        df = self.process_data(df)
         user_item_matrix = self.create_user_item_matrix(df)
         
         # Разделение данных для оценки
@@ -174,35 +179,57 @@ class OptimizedRecommenderSystem:
         
         # SVD (Matrix Factorization)
         n_components = min(30, min(dense_matrix.shape) - 1)  # Уменьшено количество компонент
+        if n_components <= 0:
+            n_components = 1
+        
         self.svd_model = TruncatedSVD(n_components=n_components, random_state=42)
         self.svd_model.fit(dense_matrix)
         
         # Item-based Collaborative Filtering (только для топ товаров)
         # Берем только товары с достаточным количеством оценок для ускорения
         item_counts = np.array(user_item_matrix.sum(axis=0))[0]
-        top_items_mask = item_counts >= np.percentile(item_counts[item_counts > 0], 50)
         
-        if np.sum(top_items_mask) > 0:
-            filtered_matrix = dense_matrix[:, top_items_mask]
-            self.item_similarity = cosine_similarity(filtered_matrix.T)
-            self.top_items_indices = np.where(top_items_mask)[0]
+        if len(item_counts) > 0 and np.max(item_counts) > 0:
+            top_items_mask = item_counts >= np.percentile(item_counts[item_counts > 0], 50)
+            
+            if np.sum(top_items_mask) > 0:
+                filtered_matrix = dense_matrix[:, top_items_mask]
+                if filtered_matrix.shape[1] > 1:  # Нужно хотя бы 2 товара для similarity
+                    self.item_similarity = cosine_similarity(filtered_matrix.T)
+                    self.top_items_indices = np.where(top_items_mask)[0]
+                else:
+                    self.item_similarity = None
+                    self.top_items_indices = None
+            else:
+                if dense_matrix.shape[1] > 1:
+                    self.item_similarity = cosine_similarity(dense_matrix.T)
+                    self.top_items_indices = np.arange(dense_matrix.shape[1])
+                else:
+                    self.item_similarity = None
+                    self.top_items_indices = None
         else:
-            self.item_similarity = cosine_similarity(dense_matrix.T)
-            self.top_items_indices = np.arange(dense_matrix.shape[1])
+            self.item_similarity = None
+            self.top_items_indices = None
         
         # Быстрая оценка качества
         sample_size = min(1000, len(test_data))
-        test_sample = test_data.sample(n=sample_size, random_state=42)
-        
-        predictions = []
-        actuals = []
-        
-        for _, row in test_sample.iterrows():
-            pred = self.predict_single_rating(row['magazin_encoded'], row['art_encoded'])
-            predictions.append(pred)
-            actuals.append(row['rating'])
-        
-        rmse = np.sqrt(np.mean((np.array(actuals) - np.array(predictions)) ** 2))
+        if sample_size > 0:
+            test_sample = test_data.sample(n=sample_size, random_state=42)
+            
+            predictions = []
+            actuals = []
+            
+            for _, row in test_sample.iterrows():
+                pred = self.predict_single_rating(row['magazin_encoded'], row['art_encoded'])
+                predictions.append(pred)
+                actuals.append(row['rating'])
+            
+            if len(predictions) > 0:
+                rmse = np.sqrt(np.mean((np.array(actuals) - np.array(predictions)) ** 2))
+            else:
+                rmse = 0.0
+        else:
+            rmse = 0.0
         
         return {
             'rmse': rmse,
@@ -218,31 +245,39 @@ class OptimizedRecommenderSystem:
         
         # SVD предсказание
         if self.svd_model and user_id < dense_matrix.shape[0] and item_id < dense_matrix.shape[1]:
-            user_factors = self.svd_model.transform(dense_matrix[user_id:user_id+1])
-            item_factors = self.svd_model.components_[:, item_id]
-            svd_pred = np.dot(user_factors[0], item_factors)
-            predictions.append(('svd', svd_pred))
+            try:
+                user_factors = self.svd_model.transform(dense_matrix[user_id:user_id+1])
+                item_factors = self.svd_model.components_[:, item_id]
+                svd_pred = np.dot(user_factors[0], item_factors)
+                predictions.append(('svd', svd_pred))
+            except:
+                pass
         
         # Item similarity предсказание (только для отфильтрованных товаров)
-        if (hasattr(self, 'top_items_indices') and 
+        if (self.item_similarity is not None and 
+            hasattr(self, 'top_items_indices') and 
+            self.top_items_indices is not None and
             user_id < dense_matrix.shape[0] and 
             item_id in self.top_items_indices):
             
-            item_idx_in_filtered = np.where(self.top_items_indices == item_id)[0]
-            if len(item_idx_in_filtered) > 0:
-                item_idx = item_idx_in_filtered[0]
-                user_ratings = dense_matrix[user_id, self.top_items_indices]
-                similar_items = self.item_similarity[item_idx]
-                
-                # Простое взвешенное среднее
-                mask = user_ratings > 0
-                if np.sum(mask) > 0:
-                    numerator = np.sum(similar_items[mask] * user_ratings[mask])
-                    denominator = np.sum(np.abs(similar_items[mask]))
+            try:
+                item_idx_in_filtered = np.where(self.top_items_indices == item_id)[0]
+                if len(item_idx_in_filtered) > 0:
+                    item_idx = item_idx_in_filtered[0]
+                    user_ratings = dense_matrix[user_id, self.top_items_indices]
+                    similar_items = self.item_similarity[item_idx]
                     
-                    if denominator > 0:
-                        similarity_pred = numerator / denominator
-                        predictions.append(('similarity', similarity_pred))
+                    # Простое взвешенное среднее
+                    mask = user_ratings > 0
+                    if np.sum(mask) > 0:
+                        numerator = np.sum(similar_items[mask] * user_ratings[mask])
+                        denominator = np.sum(np.abs(similar_items[mask]))
+                        
+                        if denominator > 0:
+                            similarity_pred = numerator / denominator
+                            predictions.append(('similarity', similarity_pred))
+            except:
+                pass
         
         # Ансамблевое предсказание
         if predictions:
