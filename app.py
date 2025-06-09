@@ -122,6 +122,10 @@ class OptimizedRecommenderSystem:
         df = df[df['Price'] > 0]
         df = df[df['Qty'] > 0]
         
+        # Приведение к строковому типу для энкодинга
+        df['Magazin'] = df['Magazin'].astype(str)
+        df['Art'] = df['Art'].astype(str)
+        
         # Создание рейтинга на основе количества и выручки
         df['Revenue'] = df['Price'] * df['Qty']
         
@@ -137,6 +141,10 @@ class OptimizedRecommenderSystem:
             'Segment': 'first',
             'Model': 'first'
         }).reset_index()
+        
+        # Убеждаемся, что все поля имеют правильный тип
+        agg_data['Segment'] = agg_data['Segment'].astype(str)
+        agg_data['Model'] = agg_data['Model'].astype(str)
         
         # Создание простого рейтинга
         agg_data['rating'] = np.log1p(agg_data['Qty']) + np.log1p(agg_data['Revenue']) * 0.1
@@ -390,12 +398,29 @@ def create_dashboard():
             # Чтение данных
             df = pd.read_excel(uploaded_file)
             
+            # Предварительная очистка типов данных
+            st.info("🔄 Предварительная обработка данных...")
+            
+            # Проверка и приведение к правильным типам
+            if 'Price' in df.columns:
+                df['Price'] = pd.to_numeric(df['Price'], errors='coerce')
+            if 'Qty' in df.columns:
+                df['Qty'] = pd.to_numeric(df['Qty'], errors='coerce')
+            
+            # Удаление строк с некорректными данными после приведения типов
+            df = df.dropna(subset=['Price', 'Qty'])
+            
             # Проверка колонок
             required_cols = ['Magazin', 'Art', 'Segment', 'Model', 'Price', 'Qty']
             missing_cols = [col for col in required_cols if col not in df.columns]
             
             if missing_cols:
                 st.error(f"Отсутствуют колонки: {missing_cols}")
+                return
+            
+            # Проверка на пустые данные после очистки
+            if len(df) == 0:
+                st.error("После очистки данных не осталось валидных записей. Проверьте качество данных.")
                 return
             
             # Отображение информации о данных
