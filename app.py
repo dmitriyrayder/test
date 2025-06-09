@@ -626,3 +626,141 @@ def create_dashboard():
                             st.dataframe(display_df, use_container_width=True)
                             
                             # Статистика
+                            col1, col2, col3, col4 = st.columns(4)
+                            with col1:
+                                avg_score = rec_df['score'].mean()
+                                st.metric("Средний прогноз", f"{avg_score:.3f}")
+                            with col2:
+                                top_segment = rec_df['segment'].mode().iloc[0] if len(rec_df) > 0 else "N/A"
+                                st.metric("Топ сегмент", top_segment)
+                            with col3:
+                                avg_price = rec_df['avg_price'].mean()
+                                st.metric("Средняя цена", f"{avg_price:.2f}")
+                            with col4:
+                                avg_transactions = rec_df['transactions'].mean()
+                                st.metric("Среднее кол-во транзакций", f"{avg_transactions:.1f}")
+                        else:
+                            st.info("Нет рекомендаций для данного магазина")
+                
+                with tab2:
+                    col1, col2, col3 = st.columns([1, 1, 1])
+                    with col1:
+                        batch_top_k = st.slider("Рекомендаций на магазин:", 5, 15, 10)
+                    with col2:
+                        show_top_n = st.slider("Показать топ для отчета:", 3, 10, 5)
+                    with col3:
+                        apply_batch_filter = st.checkbox("Применить фильтр популярности", value=True, key="batch_filter")
+                    
+                    if st.button("Сгенерировать рекомендации для всех"):
+                        with st.spinner("Генерация рекомендаций..."):
+                            all_recs = st.session_state.recommender.get_all_recommendations(
+                                batch_top_k, apply_batch_filter
+                            )
+                        
+                        if all_recs:
+                            # Создание сводной таблицы
+                            summary_data = []
+                            for shop, recs in all_recs.items():
+                                for rec in recs[:show_top_n]:
+                                    summary_data.append({
+                                        'Магазин': shop,
+                                        'Ранг': rec['rank'],
+                                        'Товар': rec['item'],
+                                        'Прогноз': rec['score'],
+                                        'Сегмент': rec['segment'],
+                                        'Модель': rec['model'],
+                                        'Цена': rec['avg_price'],
+                                        'Количество': rec['total_qty'],
+                                        'Транзакций': rec['transactions'],
+                                        'Магазинов': rec['stores'],
+                                        'Популярность': rec['popularity_score']
+                                    })
+                            
+                            summary_df = pd.DataFrame(summary_data)
+                            st.dataframe(summary_df, use_container_width=True)
+                            
+                            # Статистика
+                            col1, col2, col3, col4 = st.columns(4)
+                            with col1:
+                                st.metric("Всего рекомендаций", len(summary_data))
+                            with col2:
+                                avg_score = summary_df['Прогноз'].mean()
+                                st.metric("Средний прогноз", f"{avg_score:.3f}")
+                            with col3:
+                                unique_items = summary_df['Товар'].nunique()
+                                st.metric("Уникальных товаров", unique_items)
+                            with col4:
+                                avg_transactions = summary_df['Транзакций'].mean()
+                                st.metric("Среднее кол-во транзакций", f"{avg_transactions:.1f}")
+                            
+                            # Анализ качества рекомендаций
+                            st.subheader("🎯 Анализ качества рекомендаций")
+                            col1, col2 = st.columns(2)
+                            
+                            with col1:
+                                # Распределение по количеству транзакций
+                                st.write("**Распределение по количеству транзакций:**")
+                                transaction_bins = [1, 2, 5, 10, 20, float('inf')]
+                                transaction_labels = ['1', '2-4', '5-9', '10-19', '20+']
+                                summary_df['Транзакции_группа'] = pd.cut(
+                                    summary_df['Транзакций'], 
+                                    bins=transaction_bins, 
+                                    labels=transaction_labels, 
+                                    right=False
+                                )
+                                transaction_dist = summary_df['Транзакции_группа'].value_counts().sort_index()
+                                st.bar_chart(transaction_dist)
+                            
+                            with col2:
+                                # Топ сегменты в рекомендациях
+                                st.write("**Топ сегменты в рекомендациях:**")
+                                segment_counts = summary_df['Сегмент'].value_counts().head(10)
+                                st.bar_chart(segment_counts)
+                            
+                            # Предупреждения о качестве
+                            low_quality_items = summary_df[summary_df['Транзакций'] < min_sales_filter]
+                            if len(low_quality_items) > 0 and apply_batch_filter:
+                                st.warning(f"⚠️ Обнаружено {len(low_quality_items)} рекомендаций с количеством транзакций ниже порога ({min_sales_filter}). Проверьте настройки фильтра.")
+                            
+                            high_quality_items = summary_df[summary_df['Транзакций'] >= min_sales_filter * 2]
+                            if len(high_quality_items) > 0:
+                                quality_ratio = len(high_quality_items) / len(summary_data) * 100
+                                st.success(f"✅ {quality_ratio:.1f}% рекомендаций имеют высокое качество (>{min_sales_filter*2} транзакций)")
+                            
+                            # Скачивание результатов
+                            @st.cache_data
+                            def convert_df(df):
+                                return df.to_csv(index=False, encoding='utf-8').encode('utf-8')
+                            
+                            csv = convert_df(summary_df)
+                            st.download_button(
+                                label="📥 Скачать рекомендации (CSV)",
+                                data=csv,
+                                file_name=f'recommendations_min{min_sales_filter}_transactions.csv',
+                                mime='text/csv'
+                            )
+        
+        except Exception as e:
+            st.error(f"Ошибка при обработке файла: {str(e)}")
+            st.error("Проверьте формат данных и попробуйте снова.")
+    
+    else:
+        st.info("👆 Загрузите Excel файл для начала работы")
+        
+        # Пример структуры данных
+        st.markdown("### 📋 Требуемые колонки:")
+        st.markdown("- **Magazin** - название магазина")
+        st.markdown("- **Art** - код/название товара") 
+        st.markdown("- **Segment** - сегмент товара")
+        st.markdown("- **Model** - модель товара")
+        st.markdown("- **Price** - цена")
+        st.markdown("- **Qty** - количество")
+        
+        st.markdown("### 🎯 Новые возможности:")
+        st.markdown("- **Фильтрация по популярности** - исключение товаров с малым количеством продаж")
+        st.markdown("- **Анализ качества рекомендаций** - статистика по транзакциям и магазинам")
+        st.markdown("- **Гибкие настройки** - возможность установить минимальный порог транзакций")
+        st.markdown("- **Детальная статистика** - информация о популярности каждого товара")
+
+if __name__ == "__main__":
+    create_dashboard()
