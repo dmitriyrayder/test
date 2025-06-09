@@ -1,8 +1,6 @@
 streamlit
 pandas
 numpy
-lightfm==1.17
 scikit-learn
 plotly
 openpyxl
-scipy
