@@ -29,7 +29,7 @@ class EnsembleRecommenderSystem:
     def preprocess_data(self, df):
         """Предобработка данных"""
         df = df.copy()
-        df['Datasales'] = pd.to_datetime(df['Datasales'], errors='coerce')
+        df['Datasales'] = pd.to_datetime(df['Datasales'], dtype={'Datasales': 'datetime64[ns]'})
         df = df.dropna(subset=['Magazin', 'Art', 'Price', 'Qty'])
         
         # Создание временных признаков
