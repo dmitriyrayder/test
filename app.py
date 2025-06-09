@@ -3,8 +3,9 @@ import pandas as pd
 import numpy as np
 from sklearn.decomposition import TruncatedSVD
 from sklearn.metrics.pairwise import cosine_similarity
-from sklearn.preprocessing import LabelEncoder
+from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestRegressor
 from scipy.sparse import csr_matrix
 import warnings
 warnings.filterwarnings('ignore')
@@ -12,14 +13,102 @@ warnings.filterwarnings('ignore')
 class OptimizedRecommenderSystem:
     def __init__(self):
         self.svd_model = None
+        self.rf_model = None
         self.item_similarity = None
         self.user_item_matrix = None
         self.le_magazin = LabelEncoder()
         self.le_art = LabelEncoder()
+        self.scaler = StandardScaler()
         self.processed_data = None
-        self.weights = {'svd': 0.6, 'similarity': 0.4}  # Упрощенные веса
+        self.content_features = None
+        self.use_rf = False
+        self.weights = {'svd': 0.5, 'similarity': 0.3, 'rf': 0.2}  # Веса с RF
         
-    def preprocess_data(self, df):
+    def process_datasales(self, df):
+        """Обработка колонки Datasales с различными вариантами"""
+        if 'Datasales' not in df.columns:
+            return df
+        
+        # Попытка автоматического определения формата даты
+        datasales_col = df['Datasales'].copy()
+        
+        # Удаляем пустые значения для анализа
+        non_null_dates = datasales_col.dropna()
+        if len(non_null_dates) == 0:
+            return df
+        
+        # Пробуем разные варианты парсинга
+        date_formats = [
+            '%Y-%m-%d',
+            '%d.%m.%Y', 
+            '%d/%m/%Y',
+            '%m/%d/%Y',
+            '%Y/%m/%d',
+            '%d-%m-%Y',
+            '%Y.%m.%d'
+        ]
+        
+        parsed_dates = None
+        successful_format = None
+        
+        # Принудительное приведение к datetime64
+        try:
+            parsed_dates = pd.to_datetime(datasales_col, errors='coerce')
+            if parsed_dates.notna().sum() > len(non_null_dates) * 0.8:  # Если 80%+ успешно
+                df['Datasales'] = parsed_dates.astype('datetime64[ns]')
+                successful_format = "auto"
+        except:
+            pass
+        
+        # Если автоматический парсинг не сработал, пробуем форматы
+        if successful_format is None:
+            for fmt in date_formats:
+                try:
+                    test_dates = pd.to_datetime(non_null_dates.iloc[:min(100, len(non_null_dates))], 
+                                              format=fmt, errors='coerce')
+                    success_rate = test_dates.notna().sum() / len(test_dates)
+                    
+                    if success_rate > 0.8:  # Если 80%+ успешно распознано
+                        parsed_dates = pd.to_datetime(datasales_col, format=fmt, errors='coerce')
+                        df['Datasales'] = parsed_dates.astype('datetime64[ns]')
+                        successful_format = fmt
+                        break
+                except:
+                    continue
+        
+        # Если ничего не сработало, пробуем числовые значения как timestamp
+        if successful_format is None:
+            try:
+                # Проверяем, не являются ли значения timestamp'ами
+                numeric_dates = pd.to_numeric(datasales_col, errors='coerce')
+                if numeric_dates.notna().sum() > 0:
+                    # Пробуем интерпретировать как секунды или миллисекунды
+                    test_val = numeric_dates.dropna().iloc[0]
+                    if test_val > 1e9:  # Похоже на timestamp в секундах или миллисекундах
+                        if test_val > 1e12:  # Миллисекунды
+                            parsed_dates = pd.to_datetime(numeric_dates, unit='ms', errors='coerce')
+                        else:  # Секунды
+                            parsed_dates = pd.to_datetime(numeric_dates, unit='s', errors='coerce')
+                        
+                        df['Datasales'] = parsed_dates.astype('datetime64[ns]')
+                        successful_format = "timestamp"
+            except:
+                pass
+        
+        # Добавляем временные признаки, если дата успешно обработана
+        if successful_format and 'Datasales' in df.columns and df['Datasales'].dtype == 'datetime64[ns]':
+            df['Month'] = df['Datasales'].dt.month
+            df['Quarter'] = df['Datasales'].dt.quarter
+            df['Weekday'] = df['Datasales'].dt.dayofweek
+            df['DayOfMonth'] = df['Datasales'].dt.day
+            df['Year'] = df['Datasales'].dt.year
+            
+            # Информация об успешной обработке
+            st.info(f"✅ Колонка Datasales обработана (формат: {successful_format})")
+        else:
+            st.warning("⚠️ Не удалось обработать колонку Datasales. Продолжаем без временных признаков.")
+        
+        return df
         """Упрощенная предобработка данных"""
         df = df.copy()
         
