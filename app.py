@@ -483,7 +483,7 @@ def create_dashboard():
                     col1, col2 = st.columns(2)
                     
                     with col1:
-                        fig1 = px.histogram(filtered_data, x='rating', bins=20, title="Распределение рейтингов")
+                        fig1 = px.histogram(filtered_data, x='rating', nbins=20, title="Распределение рейтингов")
                         st.plotly_chart(fig1, use_container_width=True)
                     
                     with col2:
