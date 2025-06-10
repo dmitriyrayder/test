@@ -17,9 +17,24 @@ class DataProcessor:
     
     def preprocess_data(self, df):
         df = df.copy()
+        
+        # Преобразуем все значения в строки для избежания ошибки с mixed types
+        df['Magazin'] = df['Magazin'].astype(str)
+        df['Art'] = df['Art'].astype(str)
+        
         # Исправление парсинга даты - используем dayfirst=True для DD.MM.YYYY
         df['Datasales'] = pd.to_datetime(df['Datasales'], dayfirst=True, errors='coerce')
+        
+        # Удаляем строки с NaN значениями в критических колонках
         df = df.dropna(subset=['Magazin', 'Art', 'Price', 'Qty', 'Datasales'])
+        
+        # Убираем строки с 'nan' в строковом формате
+        df = df[df['Magazin'] != 'nan']
+        df = df[df['Art'] != 'nan']
+        
+        # Проверяем, что у нас есть данные после очистки
+        if len(df) == 0:
+            raise ValueError("После очистки данных не осталось записей")
         
         # Временные признаки
         df['Month'] = df['Datasales'].dt.month
@@ -29,7 +44,7 @@ class DataProcessor:
         # Бизнес-метрики
         df['Revenue'] = df['Price'] * df['Qty']
         
-        # Энкодинг
+        # Энкодинг - теперь все значения являются строками
         df['magazin_encoded'] = self.le_magazin.fit_transform(df['Magazin'])
         df['art_encoded'] = self.le_art.fit_transform(df['Art'])
         
@@ -87,26 +102,40 @@ class RecommenderModels:
         return self.user_item_matrix
     
     def train_models(self, user_item_matrix):
+        # Проверяем минимальные размеры для обучения
+        if min(user_item_matrix.shape) < 2:
+            st.warning("Недостаточно данных для обучения моделей")
+            return
+            
         # SVD
         n_components_svd = min(30, min(user_item_matrix.shape) - 1)
         if n_components_svd > 0:
-            self.svd_model = TruncatedSVD(n_components=n_components_svd, random_state=42)
-            self.svd_model.fit(user_item_matrix)
+            try:
+                self.svd_model = TruncatedSVD(n_components=n_components_svd, random_state=42)
+                self.svd_model.fit(user_item_matrix)
+            except Exception as e:
+                st.warning(f"Ошибка обучения SVD: {e}")
         
         # NMF
         n_components_nmf = min(20, min(user_item_matrix.shape) - 1)
         if n_components_nmf > 0:
-            self.nmf_model = NMF(n_components=n_components_nmf, random_state=42, max_iter=200)
-            self.nmf_model.fit(user_item_matrix)
+            try:
+                self.nmf_model = NMF(n_components=n_components_nmf, random_state=42, max_iter=200)
+                self.nmf_model.fit(user_item_matrix)
+            except Exception as e:
+                st.warning(f"Ошибка обучения NMF: {e}")
         
         # Item similarity
-        self.item_similarity = cosine_similarity(user_item_matrix.T)
+        try:
+            self.item_similarity = cosine_similarity(user_item_matrix.T)
+        except Exception as e:
+            st.warning(f"Ошибка расчета похожести: {e}")
     
     def predict_rating(self, user_id, item_id):
         predictions = []
         
         # SVD prediction
-        if self.svd_model and user_id < self.user_item_matrix.shape[0]:
+        if self.svd_model and user_id < self.user_item_matrix.shape[0] and item_id < self.user_item_matrix.shape[1]:
             try:
                 user_factors = self.svd_model.transform(self.user_item_matrix[user_id:user_id+1])
                 item_factors = self.svd_model.components_[:, item_id]
@@ -116,7 +145,7 @@ class RecommenderModels:
                 pass
         
         # NMF prediction
-        if self.nmf_model and user_id < self.user_item_matrix.shape[0]:
+        if self.nmf_model and user_id < self.user_item_matrix.shape[0] and item_id < self.user_item_matrix.shape[1]:
             try:
                 user_factors = self.nmf_model.transform(self.user_item_matrix[user_id:user_id+1])
                 item_factors = self.nmf_model.components_[:, item_id]
@@ -126,7 +155,9 @@ class RecommenderModels:
                 pass
         
         # Similarity prediction
-        if (user_id < self.user_item_matrix.shape[0] and item_id < self.user_item_matrix.shape[1]):
+        if (self.item_similarity is not None and 
+            user_id < self.user_item_matrix.shape[0] and 
+            item_id < self.user_item_matrix.shape[1]):
             try:
                 user_ratings = self.user_item_matrix[user_id]
                 similar_items = self.item_similarity[item_id]
@@ -150,42 +181,56 @@ class EnsembleRecommenderSystem:
         self.raw_data = None
     
     def build_model(self, df, test_size=0.2):
-        self.raw_data = df.copy()
-        
-        # Предобработка
-        processed_df = self.data_processor.preprocess_data(df)
-        self.processed_data = self.data_processor.create_aggregated_data(processed_df)
-        
-        # Создание матрицы и обучение
-        user_item_matrix = self.models.create_user_item_matrix(self.processed_data)
-        self.models.train_models(user_item_matrix)
-        
-        # Оценка модели
-        train_data, test_data = train_test_split(self.processed_data, test_size=test_size, random_state=42)
-        
-        train_predictions = [self.models.predict_rating(row['magazin_encoded'], row['art_encoded']) 
-                           for _, row in train_data.iterrows()]
-        test_predictions = [self.models.predict_rating(row['magazin_encoded'], row['art_encoded']) 
-                          for _, row in test_data.iterrows()]
-        
-        train_rmse = np.sqrt(np.mean((train_data['rating'] - train_predictions) ** 2))
-        test_rmse = np.sqrt(np.mean((test_data['rating'] - test_predictions) ** 2))
-        
-        return {
-            'train_rmse': train_rmse,
-            'test_rmse': test_rmse,
-            'n_users': len(self.processed_data['magazin_encoded'].unique()),
-            'n_items': len(self.processed_data['art_encoded'].unique()),
-            'sparsity': 1 - np.count_nonzero(user_item_matrix) / (user_item_matrix.shape[0] * user_item_matrix.shape[1])
-        }
+        try:
+            self.raw_data = df.copy()
+            
+            # Предобработка
+            processed_df = self.data_processor.preprocess_data(df)
+            self.processed_data = self.data_processor.create_aggregated_data(processed_df)
+            
+            # Создание матрицы и обучение
+            user_item_matrix = self.models.create_user_item_matrix(self.processed_data)
+            self.models.train_models(user_item_matrix)
+            
+            # Оценка модели
+            if len(self.processed_data) > 1:
+                train_data, test_data = train_test_split(self.processed_data, test_size=test_size, random_state=42)
+                
+                train_predictions = [self.models.predict_rating(row['magazin_encoded'], row['art_encoded']) 
+                                   for _, row in train_data.iterrows()]
+                test_predictions = [self.models.predict_rating(row['magazin_encoded'], row['art_encoded']) 
+                                  for _, row in test_data.iterrows()]
+                
+                train_rmse = np.sqrt(np.mean((train_data['rating'] - train_predictions) ** 2))
+                test_rmse = np.sqrt(np.mean((test_data['rating'] - test_predictions) ** 2))
+            else:
+                train_rmse = test_rmse = 0.0
+            
+            return {
+                'train_rmse': train_rmse,
+                'test_rmse': test_rmse,
+                'n_users': len(self.processed_data['magazin_encoded'].unique()),
+                'n_items': len(self.processed_data['art_encoded'].unique()),
+                'sparsity': 1 - np.count_nonzero(user_item_matrix) / (user_item_matrix.shape[0] * user_item_matrix.shape[1])
+            }
+            
+        except Exception as e:
+            st.error(f"Ошибка при построении модели: {str(e)}")
+            return None
     
     def get_recommendations(self, magazin_name, top_k=10, filters=None):
         if self.models.user_item_matrix is None:
             return None
         
         try:
+            # Преобразуем magazin_name в строку для консистентности
+            magazin_name = str(magazin_name)
             user_id = self.data_processor.le_magazin.transform([magazin_name])[0]
-        except:
+        except ValueError:
+            st.error(f"Магазин '{magazin_name}' не найден в данных")
+            return None
+        except Exception as e:
+            st.error(f"Ошибка при поиске магазина: {str(e)}")
             return None
         
         if user_id >= self.models.user_item_matrix.shape[0]:
@@ -209,7 +254,7 @@ class EnsembleRecommenderSystem:
         
         for _, row in filtered_data.iterrows():
             item_id = row['art_encoded']
-            if user_ratings[item_id] == 0:
+            if item_id < len(user_ratings) and user_ratings[item_id] == 0:
                 pred_rating = self.models.predict_rating(user_id, item_id)
                 predictions.append((row, pred_rating))
         
@@ -342,18 +387,19 @@ def create_dashboard():
                 with st.spinner("Обучение модели..."):
                     metrics = st.session_state.recommender.build_model(df)
                 
-                st.success("Модель готова!")
-                
-                col1, col2, col3, col4 = st.columns(4)
-                with col1:
-                    st.metric("RMSE (train)", f"{metrics['train_rmse']:.3f}")
-                with col2:
-                    st.metric("RMSE (test)", f"{metrics['test_rmse']:.3f}")
-                with col3:
-                    st.metric("Разреженность", f"{metrics['sparsity']:.1%}")
-                with col4:
-                    overfitting = metrics['test_rmse'] - metrics['train_rmse']
-                    st.metric("Переобучение", f"{overfitting:.3f}")
+                if metrics:
+                    st.success("Модель готова!")
+                    
+                    col1, col2, col3, col4 = st.columns(4)
+                    with col1:
+                        st.metric("RMSE (train)", f"{metrics['train_rmse']:.3f}")
+                    with col2:
+                        st.metric("RMSE (test)", f"{metrics['test_rmse']:.3f}")
+                    with col3:
+                        st.metric("Разреженность", f"{metrics['sparsity']:.1%}")
+                    with col4:
+                        overfitting = metrics['test_rmse'] - metrics['train_rmse']
+                        st.metric("Переобучение", f"{overfitting:.3f}")
             
             if st.session_state.recommender.processed_data is not None:
                 analytics_data = st.session_state.recommender.get_analytics_data()
@@ -460,6 +506,7 @@ def create_dashboard():
         
         except Exception as e:
             st.error(f"Ошибка: {str(e)}")
+            st.error("Проверьте структуру данных и убедитесь, что все необходимые колонки присутствуют")
     
     else:
         st.info("Загрузите Excel файл для начала работы")
