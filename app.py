@@ -165,6 +165,96 @@ def display_top_network_products(df, segment, limit=10):
     st.subheader(f"Топ-{limit} товаров сети в сегменте")
     st.dataframe(top_products, use_container_width=True)
 
+def generate_analysis_comments(df, store, segment, recommendations):
+    """Генерация комментариев и анализа результатов"""
+    comments = []
+    
+    # Общая статистика
+    segment_data = df[df['Segment'] == segment]
+    store_data = df[(df['Magazin'] == store) & (df['Segment'] == segment)]
+    
+    total_products = segment_data['Art'].nunique()
+    store_products = store_data['Art'].nunique()
+    coverage = (store_products / total_products * 100) if total_products > 0 else 0
+    
+    comments.append(f"## 📊 Анализ результатов для магазина '{store}' в сегменте '{segment}'")
+    comments.append(f"")
+    comments.append(f"### Общая статистика:")
+    comments.append(f"- **Общее количество товаров в сегменте:** {total_products}")
+    comments.append(f"- **Товаров представлено в магазине:** {store_products}")
+    comments.append(f"- **Покрытие ассортимента:** {coverage:.1f}%")
+    
+    if not recommendations.empty:
+        # Анализ рекомендаций
+        total_potential_qty = recommendations['Potential_Qty'].sum()
+        total_potential_revenue = recommendations['Potential_Sum'].sum()
+        avg_priority = recommendations['Priority_Score'].mean()
+        top_recommendation = recommendations.iloc[0]
+        
+        comments.append(f"")
+        comments.append(f"### Результаты рекомендательной системы:")
+        comments.append(f"- **Количество рекомендованных товаров:** {len(recommendations)}")
+        comments.append(f"- **Общий потенциал продаж:** {int(total_potential_qty)} штук")
+        comments.append(f"- **Потенциальная дополнительная выручка:** {total_potential_revenue:,.0f} грн")
+        comments.append(f"- **Средний приоритетный балл:** {avg_priority:.1f}")
+        
+        comments.append(f"")
+        comments.append(f"### Топ-рекомендация:")
+        comments.append(f"- **Артикул:** {top_recommendation['Art']}")
+        comments.append(f"- **Описание:** {top_recommendation['Describe']}")
+        comments.append(f"- **Потенциал продаж:** {int(top_recommendation['Potential_Qty'])} штук")
+        comments.append(f"- **Средняя цена:** {top_recommendation['Avg_Price']:.2f} грн")
+        comments.append(f"- **Представлен в магазинах:** {int(top_recommendation['Store_Count'])}")
+        
+        # Категоризация рекомендаций
+        high_priority = recommendations[recommendations['Priority_Score'] >= 75]
+        medium_priority = recommendations[(recommendations['Priority_Score'] >= 50) & (recommendations['Priority_Score'] < 75)]
+        low_priority = recommendations[recommendations['Priority_Score'] < 50]
+        
+        comments.append(f"")
+        comments.append(f"### Приоритетность рекомендаций:")
+        comments.append(f"- **Высокий приоритет (≥75 баллов):** {len(high_priority)} товаров")
+        comments.append(f"- **Средний приоритет (50-74 балла):** {len(medium_priority)} товаров")
+        comments.append(f"- **Низкий приоритет (<50 баллов):** {len(low_priority)} товаров")
+        
+        # Анализ по ценовым сегментам
+        price_ranges = pd.cut(recommendations['Avg_Price'], bins=3, labels=['Низкая', 'Средняя', 'Высокая'])
+        price_analysis = price_ranges.value_counts()
+        
+        comments.append(f"")
+        comments.append(f"### Распределение по ценовым сегментам:")
+        for price_range, count in price_analysis.items():
+            comments.append(f"- **{price_range} ценовая категория:** {count} товаров")
+        
+        # Рекомендации по внедрению
+        comments.append(f"")
+        comments.append(f"### 💡 Рекомендации по внедрению:")
+        
+        if coverage < 30:
+            comments.append(f"- **Низкое покрытие ассортимента ({coverage:.1f}%)** - рекомендуется активно расширять ассортимент")
+        elif coverage < 60:
+            comments.append(f"- **Среднее покрытие ассортимента ({coverage:.1f}%)** - есть хорошие возможности для роста")
+        else:
+            comments.append(f"- **Высокое покрытие ассортимента ({coverage:.1f}%)** - фокус на оптимизации существующих позиций")
+        
+        if len(high_priority) > 0:
+            comments.append(f"- **Приоритет на {len(high_priority)} товаров высокого приоритета** - они имеют наибольший потенциал")
+        
+        if total_potential_revenue > 50000:
+            comments.append(f"- **Высокий потенциал роста выручки** - внедрение рекомендаций может существенно увеличить продажи")
+        
+        comments.append(f"- **Постепенное внедрение** - начните с топ-5 позиций и отслеживайте результаты")
+        comments.append(f"- **Мониторинг эффективности** - регулярно анализируйте продажи новых позиций")
+        
+    else:
+        comments.append(f"")
+        comments.append(f"### ⚠️ Рекомендации не найдены")
+        comments.append(f"- Попробуйте изменить параметры фильтрации")
+        comments.append(f"- Уменьшите минимальные продажи в сети")
+        comments.append(f"- Увеличьте максимальные продажи в магазине")
+    
+    return "\n".join(comments)
+
 def main():
     st.title("🛍️ Рекомендательная система товаров")
     st.markdown("Система анализирует продажи и рекомендует товары с высоким потенциалом для магазина")
@@ -246,7 +336,7 @@ def main():
                 
                 with col2:
                     potential_revenue = recommendations['Potential_Sum'].sum()
-                    st.metric("Потенциальная выручка", f"{potential_revenue:,.0f} руб")
+                    st.metric("Потенциальная выручка", f"{potential_revenue:,.0f} грн")
                 
                 # Топ товаров сети для сравнения
                 with st.expander("📊 Топ товары сети в сегменте", expanded=False):
@@ -262,6 +352,19 @@ def main():
                 )
             else:
                 st.info("Рекомендации не найдены. Попробуйте изменить параметры фильтрации.")
+            
+            # Генерация и отображение аналитических комментариев
+            st.subheader("💬 Аналитические комментарии")
+            analysis_comments = generate_analysis_comments(df, selected_store, selected_segment, recommendations)
+            st.markdown(analysis_comments)
+            
+            # Возможность скачать аналитический отчет
+            st.download_button(
+                label="📄 Скачать аналитический отчет",
+                data=analysis_comments,
+                file_name=f"analysis_report_{selected_store}_{selected_segment}.md",
+                mime="text/markdown"
+            )
 
 if __name__ == "__main__":
     main()
