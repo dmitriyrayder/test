@@ -1,520 +1,267 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from sklearn.decomposition import TruncatedSVD
-from sklearn.metrics.pairwise import cosine_similarity
-from sklearn.preprocessing import LabelEncoder
-from sklearn.model_selection import train_test_split
-from sklearn.ensemble import RandomForestRegressor
-import plotly.express as px
-from scipy.sparse import csr_matrix
+from datetime import datetime, timedelta
 import warnings
 warnings.filterwarnings('ignore')
 
-class RecommenderSystem:
-    def __init__(self):
-        self.svd_model = None
-        self.item_similarity = None
-        self.rf_model = None
-        self.user_item_matrix = None
-        self.le_magazin = LabelEncoder()
-        self.le_art = LabelEncoder()
-        self.processed_data = None
-        self.weights = {'svd': 0.4, 'similarity': 0.4, 'content': 0.2}
+# Конфигурация страницы
+st.set_page_config(
+    page_title="Рекомендательная система товаров",
+    page_icon="🛍️",
+    layout="wide"
+)
+
+@st.cache_data
+def load_and_process_data(uploaded_file):
+    """Загрузка и предобработка данных из Excel"""
+    try:
+        # Загрузка данных
+        df = pd.read_excel(uploaded_file)
         
-    def preprocess_data(self, df, selected_segments=None):
-        """Предобработка данных с фильтрацией по сегментам"""
-        df = df.copy()
-        
-        # Проверка обязательных колонок
-        required_cols = ['Magazin', 'Datasales', 'Art', 'Price', 'Qty']
+        # Проверка наличия обязательных колонок
+        required_cols = ['Magazin', 'Datasales', 'Art', 'Describe', 'Model', 'Segment', 'Price', 'Qty', 'Sum']
         missing_cols = [col for col in required_cols if col not in df.columns]
         if missing_cols:
-            raise ValueError(f"Отсутствуют колонки: {missing_cols}")
+            st.error(f"Отсутствуют колонки: {missing_cols}")
+            return None
         
-        # Фильтрация по сегментам
-        if selected_segments and 'Segment' in df.columns:
-            df = df[df['Segment'].isin(selected_segments)]
-            if len(df) == 0:
-                raise ValueError("Нет данных после фильтрации сегментов")
+        # Обработка дат с автоопределением формата
+        df['Datasales'] = parse_dates(df['Datasales'])
         
         # Очистка данных
-        df = df.dropna(subset=['Magazin', 'Art', 'Price', 'Qty'])
-        df['Datasales'] = pd.to_datetime(df['Datasales'], errors='coerce')
-        df = df.dropna(subset=['Datasales'])
+        df = df.dropna(subset=['Art', 'Magazin', 'Segment'])
+        df['Qty'] = pd.to_numeric(df['Qty'], errors='coerce').fillna(0)
+        df['Price'] = pd.to_numeric(df['Price'], errors='coerce').fillna(0)
+        df['Sum'] = pd.to_numeric(df['Sum'], errors='coerce').fillna(0)
         
-        # Создание признаков
-        df['Revenue'] = df['Price'] * df['Qty']
-        df['Month'] = df['Datasales'].dt.month
+        # Удаление дубликатов
+        df = df.drop_duplicates()
         
-        # Заполнение пустых значений
-        for col in ['Segment', 'Model', 'Describe']:
-            if col not in df.columns:
-                df[col] = 'Unknown'
-            else:
-                df[col] = df[col].fillna('Unknown')
-        
-        # Энкодинг
-        df['magazin_encoded'] = self.le_magazin.fit_transform(df['Magazin'].astype(str))
-        df['art_encoded'] = self.le_art.fit_transform(df['Art'].astype(str))
-        
-        # Агрегация по магазин-товар (на основе штучных продаж)
-        agg_data = df.groupby(['magazin_encoded', 'art_encoded', 'Magazin', 'Art']).agg({
-            'Qty': ['sum', 'mean', 'count'],
-            'Revenue': 'sum',
-            'Price': 'mean',
-            'Segment': 'first',
-            'Model': 'first'
-        }).reset_index()
-        
-        # Упрощение колонок
-        agg_data.columns = ['magazin_encoded', 'art_encoded', 'Magazin', 'Art', 
-                           'qty_sum', 'qty_mean', 'freq', 'revenue_sum', 'price_mean',
-                           'Segment', 'Model']
-        
-        # Создание рейтинга на основе штучных продаж
-        agg_data['qty_sum'] = np.maximum(agg_data['qty_sum'], 1)
-        agg_data['freq'] = np.maximum(agg_data['freq'], 1)
-        
-        # Рейтинг = нормализованная функция от количества и частоты
-        agg_data['rating'] = (
-            np.log1p(agg_data['qty_sum']) * 0.7 +  # Больший вес на количество
-            np.log1p(agg_data['freq']) * 0.3
-        )
-        
-        # Нормализация рейтинга в диапазон 1-5
-        rating_min, rating_max = agg_data['rating'].min(), agg_data['rating'].max()
-        if rating_max > rating_min:
-            agg_data['rating'] = (agg_data['rating'] - rating_min) / (rating_max - rating_min) * 4 + 1
-        else:
-            agg_data['rating'] = 2.5
-        
-        self.processed_data = agg_data
-        return agg_data
-    
-    def create_user_item_matrix(self, df):
-        """Создание матрицы пользователь-товар"""
-        n_users = df['magazin_encoded'].nunique()
-        n_items = df['art_encoded'].nunique()
-        
-        user_item_matrix = csr_matrix(
-            (df['rating'], (df['magazin_encoded'], df['art_encoded'])), 
-            shape=(n_users, n_items)
-        )
-        
-        self.user_item_matrix = user_item_matrix.toarray()
-        return self.user_item_matrix
-    
-    def build_model(self, df, selected_segments=None):
-        """Построение модели"""
-        # Предобработка
-        df = self.preprocess_data(df, selected_segments)
-        if len(df) < 10:
-            raise ValueError("Недостаточно данных (минимум 10 записей)")
-        
-        user_item_matrix = self.create_user_item_matrix(df)
-        
-        # Разделение данных
-        train_data, test_data = train_test_split(df, test_size=0.2, random_state=42)
-        
-        # 1. SVD
-        n_components = min(30, min(user_item_matrix.shape) - 1)
-        if n_components > 0:
-            self.svd_model = TruncatedSVD(n_components=n_components, random_state=42)
-            self.svd_model.fit(user_item_matrix)
-        
-        # 2. Item Similarity
-        if user_item_matrix.shape[1] > 1:
-            self.item_similarity = cosine_similarity(user_item_matrix.T)
-        
-        # 3. Content-based Random Forest
-        try:
-            # Создание контентных признаков
-            item_features = df.groupby('art_encoded').agg({
-                'price_mean': 'first',
-                'qty_mean': 'first',
-                'Segment': 'first'
-            }).reset_index()
-            
-            # One-hot encoding для сегментов
-            segment_dummies = pd.get_dummies(item_features['Segment'], prefix='segment')
-            
-            # Объединение признаков
-            features_df = pd.concat([
-                item_features[['art_encoded', 'price_mean', 'qty_mean']],
-                segment_dummies
-            ], axis=1)
-            
-            # Подготовка данных для RF
-            rf_data = df.merge(features_df, on='art_encoded', how='left')
-            feature_cols = [col for col in features_df.columns if col != 'art_encoded']
-            
-            X = rf_data[feature_cols].fillna(0)
-            y = rf_data['rating']
-            
-            self.rf_model = RandomForestRegressor(n_estimators=50, max_depth=5, random_state=42)
-            self.rf_model.fit(X, y)
-            self.feature_columns = feature_cols
-            self.content_features = features_df
-            
-        except Exception as e:
-            st.warning(f"Content-based модель не построена: {e}")
-            self.rf_model = None
-        
-        # Вычисление метрик
-        train_pred = self.predict_batch(train_data)
-        test_pred = self.predict_batch(test_data)
-        
-        train_rmse = np.sqrt(np.mean((train_data['rating'] - train_pred) ** 2))
-        test_rmse = np.sqrt(np.mean((test_data['rating'] - test_pred) ** 2))
-        
-        return {
-            'train_rmse': train_rmse,
-            'test_rmse': test_rmse,
-            'n_users': len(df['magazin_encoded'].unique()),
-            'n_items': len(df['art_encoded'].unique()),
-            'sparsity': 1 - np.count_nonzero(user_item_matrix) / user_item_matrix.size
-        }
-    
-    def predict_batch(self, data):
-        """Предсказание для батча данных"""
-        predictions = []
-        for _, row in data.iterrows():
-            pred = self.predict_rating(row['magazin_encoded'], row['art_encoded'])
-            predictions.append(pred)
-        return np.array(predictions)
-    
-    def predict_rating(self, user_id, item_id):
-        """Предсказание рейтинга"""
-        if (user_id >= self.user_item_matrix.shape[0] or 
-            item_id >= self.user_item_matrix.shape[1]):
-            return 2.5
-        
-        predictions = []
-        
-        # SVD предсказание
-        if self.svd_model is not None:
-            try:
-                user_vec = self.svd_model.transform(self.user_item_matrix[user_id:user_id+1])
-                item_vec = self.svd_model.components_[:, item_id]
-                svd_pred = np.dot(user_vec, item_vec.reshape(-1, 1))[0, 0]
-                predictions.append(('svd', svd_pred))
-            except:
-                pass
-        
-        # Similarity предсказание
-        if self.item_similarity is not None:
-            try:
-                user_ratings = self.user_item_matrix[user_id]
-                similar_items = self.item_similarity[item_id]
-                
-                numerator = np.sum(similar_items * user_ratings)
-                denominator = np.sum(np.abs(similar_items))
-                
-                if denominator > 1e-8:
-                    sim_pred = numerator / denominator
-                    predictions.append(('similarity', sim_pred))
-            except:
-                pass
-        
-        # Content предсказание
-        if self.rf_model is not None:
-            try:
-                item_data = self.content_features[
-                    self.content_features['art_encoded'] == item_id
-                ]
-                if len(item_data) > 0:
-                    X = item_data[self.feature_columns].fillna(0)
-                    content_pred = self.rf_model.predict(X)[0]
-                    predictions.append(('content', content_pred))
-            except:
-                pass
-        
-        # Ансамблевое предсказание
-        if predictions:
-            weighted_sum = sum(pred * self.weights.get(method, 0.33) for method, pred in predictions)
-            total_weight = sum(self.weights.get(method, 0.33) for method, _ in predictions)
-            return np.clip(weighted_sum / total_weight, 1.0, 5.0)
-        
-        return 2.5
-    
-    def get_recommendations(self, magazin_name, top_k=10):
-        """Получение рекомендаций"""
-        try:
-            user_id = self.le_magazin.transform([magazin_name])[0]
-        except:
-            return None
-        
-        if user_id >= self.user_item_matrix.shape[0]:
-            return None
-        
-        user_ratings = self.user_item_matrix[user_id]
-        predictions = []
-        
-        for item_id in range(self.user_item_matrix.shape[1]):
-            if user_ratings[item_id] == 0:  # Только неоцененные товары
-                pred = self.predict_rating(user_id, item_id)
-                predictions.append((item_id, pred))
-        
-        if not predictions:
-            return None
-        
-        # Сортировка и выбор топ-K
-        predictions.sort(key=lambda x: x[1], reverse=True)
-        top_items = predictions[:top_k]
-        
-        recommendations = []
-        for rank, (item_id, score) in enumerate(top_items, 1):
-            try:
-                item_name = self.le_art.inverse_transform([item_id])[0]
-                item_info = self.processed_data[
-                    self.processed_data['art_encoded'] == item_id
-                ]
-                
-                if len(item_info) > 0:
-                    info = item_info.iloc[0]
-                    rec = {
-                        'rank': rank,
-                        'item': item_name,
-                        'score': score,
-                        'segment': info['Segment'],
-                        'model': info['Model'],
-                        'avg_price': info['price_mean'],
-                        'expected_qty': info['qty_mean']
-                    }
-                else:
-                    rec = {
-                        'rank': rank,
-                        'item': item_name,
-                        'score': score,
-                        'segment': 'Unknown',
-                        'model': 'Unknown',
-                        'avg_price': 0,
-                        'expected_qty': 0
-                    }
-                
-                recommendations.append(rec)
-            except:
-                continue
-        
-        return recommendations
+        return df
+    except Exception as e:
+        st.error(f"Ошибка загрузки данных: {str(e)}")
+        return None
 
-def create_dashboard():
-    st.set_page_config(page_title="Рекомендательная система", layout="wide")
+def parse_dates(date_series):
+    """Автоматическое определение и парсинг формата дат"""
+    date_formats = ['%d.%m.%Y', '%d/%m/%Y', '%Y-%m-%d', '%d-%m-%Y', '%d.%m.%y', '%d/%m/%y']
     
-    st.title("🛍️ Рекомендательная система")
-    st.markdown("*Ансамбль: SVD + Коллаборативная фильтрация + Content-based*")
-    st.markdown("---")
+    for fmt in date_formats:
+        try:
+            return pd.to_datetime(date_series, format=fmt, errors='coerce')
+        except:
+            continue
     
-    # Инициализация
-    if 'recommender' not in st.session_state:
-        st.session_state.recommender = RecommenderSystem()
+    # Если стандартные форматы не подошли
+    return pd.to_datetime(date_series, infer_datetime_format=True, errors='coerce')
+
+def calculate_network_stats(df, segment):
+    """Расчет статистики продаж по сети для сегмента"""
+    segment_data = df[df['Segment'] == segment].copy()
+    
+    network_stats = segment_data.groupby('Art').agg({
+        'Qty': ['sum', 'count'],
+        'Sum': 'sum',
+        'Price': 'mean',
+        'Describe': 'first',
+        'Model': 'first',
+        'Magazin': 'nunique'
+    }).reset_index()
+    
+    # Упрощение названий колонок
+    network_stats.columns = ['Art', 'Total_Qty', 'Sales_Count', 'Total_Sum', 'Avg_Price', 'Describe', 'Model', 'Store_Count']
+    
+    return network_stats
+
+def generate_recommendations(df, store, segment, min_network_qty=10, max_store_qty=2):
+    """Генерация рекомендаций для магазина и сегмента"""
+    
+    # Получение статистики по сети
+    network_stats = calculate_network_stats(df, segment)
+    
+    # Фильтрация товаров с хорошими продажами в сети
+    good_network_products = network_stats[
+        (network_stats['Total_Qty'] >= min_network_qty) & 
+        (network_stats['Store_Count'] >= 2)
+    ].copy()
+    
+    # Получение продаж в выбранном магазине
+    store_data = df[(df['Magazin'] == store) & (df['Segment'] == segment)].copy()
+    store_sales = store_data.groupby('Art')['Qty'].sum().reset_index()
+    store_sales.columns = ['Art', 'Store_Qty']
+    
+    # Объединение данных
+    recommendations = good_network_products.merge(store_sales, on='Art', how='left')
+    recommendations['Store_Qty'] = recommendations['Store_Qty'].fillna(0)
+    
+    # Фильтрация товаров с низкими продажами в магазине
+    recommendations = recommendations[recommendations['Store_Qty'] <= max_store_qty].copy()
+    
+    # Расчет потенциала и приоритета
+    recommendations['Potential_Qty'] = recommendations['Total_Qty'] - recommendations['Store_Qty']
+    recommendations['Potential_Sum'] = recommendations['Potential_Qty'] * recommendations['Avg_Price']
+    recommendations['Priority_Score'] = (
+        recommendations['Potential_Qty'] * 0.4 + 
+        recommendations['Store_Count'] * 0.3 + 
+        (recommendations['Total_Sum'] / recommendations['Total_Sum'].max()) * 100 * 0.3
+    )
+    
+    # Сортировка по приоритету
+    recommendations = recommendations.sort_values('Priority_Score', ascending=False)
+    
+    return recommendations
+
+def display_statistics(df, store, segment):
+    """Отображение общей статистики"""
+    segment_data = df[df['Segment'] == segment]
+    store_data = df[(df['Magazin'] == store) & (df['Segment'] == segment)]
+    
+    total_products = segment_data['Art'].nunique()
+    store_products = store_data['Art'].nunique()
+    coverage = (store_products / total_products * 100) if total_products > 0 else 0
+    
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric("Товаров в сегменте", total_products)
+    with col2:
+        st.metric("Товаров в магазине", store_products)
+    with col3:
+        st.metric("Покрытие ассортимента", f"{coverage:.1f}%")
+    with col4:
+        avg_network_qty = segment_data.groupby('Art')['Qty'].sum().mean()
+        st.metric("Средние продажи в сети", f"{avg_network_qty:.1f} шт")
+
+def display_recommendations_table(recommendations):
+    """Отображение таблицы рекомендаций"""
+    if recommendations.empty:
+        st.warning("Рекомендации не найдены с текущими параметрами")
+        return
+    
+    # Подготовка данных для отображения
+    display_df = recommendations[['Art', 'Describe', 'Model', 'Avg_Price', 'Total_Qty', 'Store_Qty', 'Potential_Qty', 'Store_Count']].copy()
+    display_df.columns = ['Артикул', 'Описание', 'Модель', 'Цена', 'Продажи сети', 'Продажи магазина', 'Потенциал', 'Магазинов']
+    
+    # Форматирование числовых колонок
+    display_df['Цена'] = display_df['Цена'].round(2)
+    display_df['Продажи сети'] = display_df['Продажи сети'].astype(int)
+    display_df['Продажи магазина'] = display_df['Продажи магазина'].astype(int)
+    display_df['Потенциал'] = display_df['Потенциал'].astype(int)
+    display_df['Магазинов'] = display_df['Магазинов'].astype(int)
+    
+    st.dataframe(display_df, use_container_width=True, height=400)
+
+def display_top_network_products(df, segment, limit=10):
+    """Отображение топ товаров сети в сегменте"""
+    network_stats = calculate_network_stats(df, segment)
+    top_products = network_stats.nlargest(limit, 'Total_Qty')[['Art', 'Describe', 'Total_Qty', 'Avg_Price', 'Store_Count']]
+    
+    top_products.columns = ['Артикул', 'Описание', 'Продажи', 'Цена', 'Магазинов']
+    top_products['Продажи'] = top_products['Продажи'].astype(int)
+    top_products['Цена'] = top_products['Цена'].round(2)
+    top_products['Магазинов'] = top_products['Магазинов'].astype(int)
+    
+    st.subheader(f"Топ-{limit} товаров сети в сегменте")
+    st.dataframe(top_products, use_container_width=True)
+
+def main():
+    st.title("🛍️ Рекомендательная система товаров")
+    st.markdown("Система анализирует продажи и рекомендует товары с высоким потенциалом для магазина")
     
     # Загрузка файла
-    st.sidebar.header("📁 Загрузка данных")
-    uploaded_file = st.sidebar.file_uploader("Выберите Excel файл", type=['xlsx', 'xls'])
+    uploaded_file = st.file_uploader(
+        "Загрузите Excel файл с данными о продажах", 
+        type=['xlsx', 'xls'],
+        help="Файл должен содержать колонки: Magazin, Datasales, Art, Describe, Model, Segment, Price, Qty, Sum"
+    )
     
-    if uploaded_file is not None:
-        try:
-            df = pd.read_excel(uploaded_file)
+    if uploaded_file is None:
+        st.info("👆 Загрузите Excel файл для начала работы")
+        return
+    
+    # Загрузка и обработка данных
+    with st.spinner("Загрузка и обработка данных..."):
+        df = load_and_process_data(uploaded_file)
+    
+    if df is None:
+        return
+    
+    st.success(f"✅ Данные загружены: {len(df)} записей")
+    
+    # Боковая панель с параметрами
+    with st.sidebar:
+        st.header("⚙️ Параметры")
+        
+        # Выбор магазина и сегмента
+        stores = sorted(df['Magazin'].unique())
+        segments = sorted(df['Segment'].unique())
+        
+        selected_store = st.selectbox("🏪 Выберите магазин:", stores)
+        selected_segment = st.selectbox("📊 Выберите сегмент:", segments)
+        
+        st.subheader("Настройки рекомендаций")
+        min_network_qty = st.number_input(
+            "Мин. продажи в сети (шт):", 
+            min_value=1, max_value=100, value=10,
+            help="Минимальное количество продаж товара в сети для рекомендации"
+        )
+        
+        max_store_qty = st.number_input(
+            "Макс. продажи в магазине (шт):", 
+            min_value=0, max_value=10, value=2,
+            help="Максимальное количество продаж в магазине (порог 'разовых продаж')"
+        )
+        
+        # Кнопка генерации рекомендаций
+        generate_btn = st.button("🎯 Сделать рекомендацию", type="primary", use_container_width=True)
+    
+    # Отображение результатов
+    if generate_btn:
+        with st.spinner("Генерация рекомендаций..."):
             
-            # Проверка колонок
-            required_cols = ['Magazin', 'Datasales', 'Art', 'Price', 'Qty']
-            missing_cols = [col for col in required_cols if col not in df.columns]
+            # Статистика
+            st.subheader("📈 Общая статистика")
+            display_statistics(df, selected_store, selected_segment)
             
-            if missing_cols:
-                st.error(f"Отсутствуют колонки: {missing_cols}")
-                return
+            # Генерация рекомендаций
+            recommendations = generate_recommendations(
+                df, selected_store, selected_segment, 
+                min_network_qty, max_store_qty
+            )
             
-            # Информация о данных
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.metric("Записей", len(df))
-            with col2:
-                st.metric("Магазинов", df['Magazin'].nunique())
-            with col3:
-                st.metric("Товаров", df['Art'].nunique())
-            with col4:
-                segments = df['Segment'].nunique() if 'Segment' in df.columns else 0
-                st.metric("Сегментов", segments)
+            st.subheader("🎯 Рекомендации товаров")
+            st.markdown(f"**Магазин:** {selected_store} | **Сегмент:** {selected_segment}")
             
-            # Фильтр сегментов
-            segment_filter = None
-            if 'Segment' in df.columns and df['Segment'].nunique() > 1:
-                st.sidebar.header("🎯 Фильтр сегментов")
-                all_segments = df['Segment'].dropna().unique().tolist()
-                selected_segments = st.sidebar.multiselect(
-                    "Выберите сегменты:",
-                    options=all_segments,
-                    default=all_segments,
-                    help="Выберите сегменты для обучения модели"
+            if not recommendations.empty:
+                st.markdown(f"Найдено **{len(recommendations)}** товаров для рекомендации")
+                display_recommendations_table(recommendations)
+                
+                # Дополнительная аналитика
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    total_potential = recommendations['Potential_Qty'].sum()
+                    st.metric("Общий потенциал (шт)", int(total_potential))
+                
+                with col2:
+                    potential_revenue = recommendations['Potential_Sum'].sum()
+                    st.metric("Потенциальная выручка", f"{potential_revenue:,.0f} руб")
+                
+                # Топ товаров сети для сравнения
+                with st.expander("📊 Топ товары сети в сегменте", expanded=False):
+                    display_top_network_products(df, selected_segment)
+                
+                # Возможность скачать рекомендации
+                csv = recommendations.to_csv(index=False, encoding='utf-8-sig')
+                st.download_button(
+                    label="💾 Скачать рекомендации (CSV)",
+                    data=csv,
+                    file_name=f"recommendations_{selected_store}_{selected_segment}.csv",
+                    mime="text/csv"
                 )
-                
-                if selected_segments != all_segments:
-                    segment_filter = selected_segments
-                    filtered_count = len(df[df['Segment'].isin(selected_segments)])
-                    st.sidebar.info(f"Записей после фильтрации: {filtered_count}")
-            
-            # Построение модели
-            if st.sidebar.button("🚀 Построить модель", type="primary"):
-                try:
-                    with st.spinner("Обучение модели..."):
-                        metrics = st.session_state.recommender.build_model(df, segment_filter)
-                    
-                    st.success("Модель обучена!")
-                    
-                    col1, col2, col3, col4 = st.columns(4)
-                    with col1:
-                        st.metric("RMSE (train)", f"{metrics['train_rmse']:.3f}")
-                    with col2:
-                        st.metric("RMSE (test)", f"{metrics['test_rmse']:.3f}")
-                    with col3:
-                        st.metric("Разреженность", f"{metrics['sparsity']:.1%}")
-                    with col4:
-                        overfitting = max(0, metrics['test_rmse'] - metrics['train_rmse'])
-                        st.metric("Переобучение", f"{overfitting:.3f}")
-                        
-                except Exception as e:
-                    st.error(f"Ошибка: {str(e)}")
-            
-            # Рекомендации
-            if st.session_state.recommender.user_item_matrix is not None:
-                st.markdown("---")
-                st.header("📊 Рекомендации")
-                
-                tab1, tab2, tab3 = st.tabs(["Одиночные", "Массовые", "Аналитика"])
-                
-                with tab1:
-                    col1, col2 = st.columns([2, 1])
-                    with col1:
-                        selected_shop = st.selectbox(
-                            "Магазин:",
-                            options=st.session_state.recommender.le_magazin.classes_
-                        )
-                    with col2:
-                        top_k = st.slider("Количество:", 5, 20, 10)
-                    
-                    if st.button("Получить рекомендации"):
-                        recs = st.session_state.recommender.get_recommendations(selected_shop, top_k)
-                        
-                        if recs:
-                            rec_df = pd.DataFrame(recs)
-                            
-                            # Форматирование
-                            display_df = rec_df.copy()
-                            display_df['score'] = display_df['score'].round(3)
-                            display_df['avg_price'] = display_df['avg_price'].round(2)
-                            display_df['expected_qty'] = display_df['expected_qty'].round(1)
-                            
-                            st.dataframe(display_df, use_container_width=True)
-                            
-                            # График
-                            fig = px.bar(
-                                rec_df.head(10), x='item', y='score',
-                                title=f"Топ-10 для {selected_shop}",
-                                color='score',
-                                color_continuous_scale='viridis'
-                            )
-                            fig.update_xaxes(tickangle=45)
-                            st.plotly_chart(fig, use_container_width=True)
-                        else:
-                            st.warning("Нет рекомендаций")
-                
-                with tab2:
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        batch_k = st.slider("Рекомендаций на магазин:", 5, 15, 8)
-                    with col2:
-                        show_top = st.slider("Показать в отчете:", 3, 10, 5)
-                    
-                    if st.button("Генерировать для всех"):
-                        summary_data = []
-                        
-                        with st.spinner("Генерация..."):
-                            for shop in st.session_state.recommender.le_magazin.classes_:
-                                recs = st.session_state.recommender.get_recommendations(shop, batch_k)
-                                if recs:
-                                    for rec in recs[:show_top]:
-                                        summary_data.append({
-                                            'Магазин': shop,
-                                            'Ранг': rec['rank'],
-                                            'Товар': rec['item'],
-                                            'Прогноз': f"{rec['score']:.3f}",
-                                            'Сегмент': rec['segment'],
-                                            'Цена': f"{rec['avg_price']:.2f}"
-                                        })
-                        
-                        if summary_data:
-                            summary_df = pd.DataFrame(summary_data)
-                            st.dataframe(summary_df, use_container_width=True)
-                            
-                            col1, col2, col3 = st.columns(3)
-                            with col1:
-                                st.metric("Всего", len(summary_data))
-                            with col2:
-                                avg_score = np.mean([float(x) for x in summary_df['Прогноз']])
-                                st.metric("Средний прогноз", f"{avg_score:.3f}")
-                            with col3:
-                                st.metric("Уникальных товаров", summary_df['Товар'].nunique())
-                            
-                            # Скачивание
-                            csv = summary_df.to_csv(index=False).encode('utf-8')
-                            st.download_button(
-                                "📥 Скачать CSV",
-                                data=csv,
-                                file_name='recommendations.csv',
-                                mime='text/csv'
-                            )
-                
-                with tab3:
-                    if st.session_state.recommender.processed_data is not None:
-                        data = st.session_state.recommender.processed_data
-                        
-                        col1, col2 = st.columns(2)
-                        
-                        with col1:
-                            # Исправленный histogram
-                            fig1 = px.histogram(
-                                data, x='rating', nbins=20,
-                                title="Распределение рейтингов"
-                            )
-                            st.plotly_chart(fig1, use_container_width=True)
-                        
-                        with col2:
-                            if 'Segment' in data.columns and data['Segment'].nunique() > 1:
-                                segment_rating = data.groupby('Segment')['rating'].mean().sort_values(ascending=False)
-                                fig2 = px.bar(
-                                    x=segment_rating.index, y=segment_rating.values,
-                                    title="Рейтинг по сегментам"
-                                )
-                                st.plotly_chart(fig2, use_container_width=True)
-                        
-                        # Топ товары по продажам
-                        top_items = data.nlargest(10, 'qty_sum')[['Art', 'qty_sum', 'Segment']]
-                        fig3 = px.bar(
-                            top_items, x='Art', y='qty_sum', color='Segment',
-                            title="Топ-10 товаров по продажам"
-                        )
-                        fig3.update_xaxes(tickangle=45)
-                        st.plotly_chart(fig3, use_container_width=True)
-        
-        except Exception as e:
-            st.error(f"Ошибка: {str(e)}")
-    
-    else:
-        st.info("👆 Загрузите Excel файл")
-        
-        # Пример данных
-        st.markdown("### 📋 Пример структуры:")
-        example = pd.DataFrame({
-            'Magazin': ['Shop_A', 'Shop_B', 'Shop_A'],
-            'Datasales': ['2024-01-15', '2024-01-16', '2024-01-17'],
-            'Art': ['Item_001', 'Item_002', 'Item_001'],
-            'Segment': ['Electronics', 'Clothing', 'Electronics'],
-            'Price': [100, 50, 100],
-            'Qty': [2, 1, 3]
-        })
-        st.dataframe(example, use_container_width=True)
+            else:
+                st.info("Рекомендации не найдены. Попробуйте изменить параметры фильтрации.")
 
 if __name__ == "__main__":
-    create_dashboard()
+    main()
