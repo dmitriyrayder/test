@@ -228,83 +228,64 @@ def generate_recommendations_with_abc(df, store, segment, min_network_qty=10, ma
     
     return recommendations.sort_values('Priority_Score', ascending=False)
 
-def create_ab_testing_scenarios(recommendations):
-    """Создание сценариев A/B тестирования"""
-    if recommendations.empty:
-        return {}
+def generate_detailed_statistics(df, store, segment, recommendations):
+    """Генерация детальной табличной статистики"""
+    segment_data = df[df['Segment'] == segment]
+    store_data = df[(df['Magazin'] == store) & (df['Segment'] == segment)]
     
-    scenarios = {
-        'Scenario A - Топ ABC': {
-            'strategy': 'Фокус на товарах категории A',
-            'products': recommendations[recommendations['ABC'] == 'A'].head(10),
-            'description': 'Концентрация на самых прибыльных товарах'
-        },
-        'Scenario B - Баланс': {
-            'strategy': 'Сбалансированный подход по всем категориям',
-            'products': recommendations.head(10),
-            'description': 'Равномерное распределение по ABC категориям'
-        },
-        'Scenario C - Высокий потенциал': {
-            'strategy': 'Товары с максимальным потенциалом продаж',
-            'products': recommendations.nlargest(10, 'Potential_Qty'),
-            'description': 'Фокус на товарах с наибольшим потенциалом количества продаж'
-        }
+    # Статистика по ABC категориям
+    abc_stats = []
+    if not recommendations.empty:
+        for abc_cat in ['A', 'B', 'C']:
+            abc_products = recommendations[recommendations['ABC'] == abc_cat]
+            if not abc_products.empty:
+                abc_stats.append({
+                    'ABC_Категория': abc_cat,
+                    'Количество_товаров': len(abc_products),
+                    'Потенциал_продаж': int(abc_products['Potential_Qty'].sum()),
+                    'Потенциальная_выручка': round(abc_products['Potential_Sum'].sum(), 0),
+                    'Средний_приоритет': round(abc_products['Priority_Score'].mean(), 1)
+                })
+    
+    # Статистика по магазинам сети
+    network_stats = segment_data.groupby('Magazin').agg({
+        'Art': 'nunique',
+        'Qty': 'sum',
+        'Sum': 'sum'
+    }).reset_index()
+    network_stats.columns = ['Магазин', 'Уникальных_товаров', 'Общее_количество', 'Общая_выручка']
+    network_stats = network_stats.sort_values('Общая_выручка', ascending=False)
+    
+    # Топ товары по продажам в сегменте
+    top_products = segment_data.groupby(['Art', 'Describe']).agg({
+        'Qty': 'sum',
+        'Sum': 'sum',
+        'Magazin': 'nunique'
+    }).reset_index()
+    top_products.columns = ['Артикул', 'Описание', 'Количество', 'Выручка', 'Магазинов']
+    top_products = top_products.sort_values('Выручка', ascending=False).head(15)
+    
+    # Статистика по месяцам
+    monthly_stats = segment_data.groupby('Month').agg({
+        'Qty': 'sum',
+        'Sum': 'sum',
+        'Art': 'nunique'
+    }).reset_index()
+    
+    month_names = {1:'Январь', 2:'Февраль', 3:'Март', 4:'Апрель', 5:'Май', 6:'Июнь',
+                   7:'Июль', 8:'Август', 9:'Сентябрь', 10:'Октябрь', 11:'Ноябрь', 12:'Декабрь'}
+    monthly_stats['Месяц'] = monthly_stats['Month'].map(month_names)
+    monthly_stats = monthly_stats[['Месяц', 'Qty', 'Sum', 'Art']]
+    monthly_stats.columns = ['Месяц', 'Количество', 'Выручка', 'Уникальных_товаров']
+    
+    return {
+        'abc_stats': pd.DataFrame(abc_stats),
+        'network_stats': network_stats,
+        'top_products': top_products,
+        'monthly_stats': monthly_stats
     }
-    
-    return scenarios
 
-def feedback_system():
-    """Система обратной связи"""
-    st.subheader("📝 Система обратной связи")
-    
-    # Инициализация session state для отзывов
-    if 'feedback_data' not in st.session_state:
-        st.session_state.feedback_data = []
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.write("**Оцените рекомендации:**")
-        product_art = st.text_input("Артикул товара:")
-        rating = st.select_slider("Оценка эффективности:", 
-                                options=[1, 2, 3, 4, 5], 
-                                format_func=lambda x: "⭐" * x)
-        
-        success = st.selectbox("Результат внедрения:", 
-                              ["Выберите...", "Успешно", "Частично успешно", "Неуспешно"])
-        
-        comment = st.text_area("Комментарий:")
-        
-        if st.button("💾 Сохранить отзыв"):
-            if product_art and success != "Выберите...":
-                feedback = {
-                    'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    'product_art': product_art,
-                    'rating': rating,
-                    'success': success,
-                    'comment': comment
-                }
-                st.session_state.feedback_data.append(feedback)
-                st.success("✅ Отзыв сохранен!")
-            else:
-                st.error("Заполните обязательные поля")
-    
-    with col2:
-        st.write("**История отзывов:**")
-        if st.session_state.feedback_data:
-            feedback_df = pd.DataFrame(st.session_state.feedback_data)
-            st.dataframe(feedback_df, use_container_width=True)
-            
-            # Статистика по отзывам
-            avg_rating = feedback_df['rating'].mean()
-            success_rate = (feedback_df['success'] == 'Успешно').sum() / len(feedback_df) * 100
-            
-            st.metric("Средняя оценка", f"{avg_rating:.1f}⭐")
-            st.metric("Успешность", f"{success_rate:.1f}%")
-        else:
-            st.info("Отзывов пока нет")
-
-def create_excel_report(df, store, segment, recommendations, abc_df, seasonality_data, lifecycle_df, alerts):
+def create_excel_report(df, store, segment, recommendations, abc_df, seasonality_data, lifecycle_df, alerts, detailed_stats):
     """Создание Excel отчета"""
     output = BytesIO()
     
@@ -316,7 +297,7 @@ def create_excel_report(df, store, segment, recommendations, abc_df, seasonality
                          'Потенциал', 'Магазинов', 'ABC', 'Приоритет']
         rec_df.to_excel(writer, sheet_name='Рекомендации', index=False)
         
-        # Лист 2: Статистика
+        # Лист 2: Общая статистика
         segment_data = df[df['Segment'] == segment]
         store_data = df[(df['Magazin'] == store) & (df['Segment'] == segment)]
         
@@ -331,19 +312,32 @@ def create_excel_report(df, store, segment, recommendations, abc_df, seasonality
                 round(recommendations['Potential_Sum'].sum(), 0) if not recommendations.empty else 0
             ]
         })
-        stats.to_excel(writer, sheet_name='Статистика', index=False)
+        stats.to_excel(writer, sheet_name='Общая статистика', index=False)
         
-        # Лист 3: Жизненный цикл товаров
+        # Лист 3: ABC статистика
+        if not detailed_stats['abc_stats'].empty:
+            detailed_stats['abc_stats'].to_excel(writer, sheet_name='ABC статистика', index=False)
+        
+        # Лист 4: Статистика по сети
+        detailed_stats['network_stats'].to_excel(writer, sheet_name='Статистика по сети', index=False)
+        
+        # Лист 5: Топ товары
+        detailed_stats['top_products'].to_excel(writer, sheet_name='Топ товары', index=False)
+        
+        # Лист 6: Месячная статистика
+        detailed_stats['monthly_stats'].to_excel(writer, sheet_name='Месячная статистика', index=False)
+        
+        # Лист 7: Жизненный цикл товаров
         lifecycle_df.to_excel(writer, sheet_name='Жизненный цикл', index=False)
         
-        # Лист 4: Сезонность
+        # Лист 8: Сезонность
         season_df = pd.DataFrame({
             'Месяц': seasonality_data['months'],
             'Продажи': seasonality_data['sales']
         })
         season_df.to_excel(writer, sheet_name='Сезонность', index=False)
         
-        # Лист 5: Алерты
+        # Лист 9: Алерты
         if alerts:
             alerts_df = pd.DataFrame(alerts)
             alerts_df.to_excel(writer, sheet_name='Алерты', index=False)
@@ -413,25 +407,52 @@ def display_results(df, store, segment, recommendations, seasonality_data, lifec
     else:
         st.info("Рекомендации не найдены. Попробуйте изменить параметры.")
     
-    # A/B тестирование сценариев
-    st.subheader("🧪 A/B Тестирование стратегий")
-    ab_scenarios = create_ab_testing_scenarios(recommendations)
+    # Детальная табличная статистика
+    st.subheader("📊 Детальная статистика")
+    detailed_stats = generate_detailed_statistics(df, store, segment, recommendations)
     
-    if ab_scenarios:
-        scenario_tabs = st.tabs(list(ab_scenarios.keys()))
+    # Создаем табы для разных таблиц
+    tab1, tab2, tab3, tab4 = st.tabs(["ABC Статистика", "Статистика по сети", "Топ товары", "Месячная статистика"])
+    
+    with tab1:
+        st.write("**Статистика по ABC категориям:**")
+        if not detailed_stats['abc_stats'].empty:
+            st.dataframe(detailed_stats['abc_stats'], use_container_width=True)
+        else:
+            st.info("Нет данных по ABC категориям")
+    
+    with tab2:
+        st.write("**Статистика по магазинам сети:**")
+        st.dataframe(detailed_stats['network_stats'], use_container_width=True)
         
-        for i, (scenario_name, scenario_data) in enumerate(ab_scenarios.items()):
-            with scenario_tabs[i]:
-                st.write(f"**Стратегия:** {scenario_data['strategy']}")
-                st.write(f"**Описание:** {scenario_data['description']}")
-                
-                if not scenario_data['products'].empty:
-                    scenario_summary = scenario_data['products'][['Art', 'Describe', 'Potential_Qty', 'ABC']].copy()
-                    scenario_summary.columns = ['Артикул', 'Описание', 'Потенциал', 'ABC']
-                    st.dataframe(scenario_summary, use_container_width=True)
-                    
-                    total_potential = scenario_data['products']['Potential_Qty'].sum()
-                    st.metric("Общий потенциал сценария", f"{int(total_potential)} шт")
+        # Выделяем текущий магазин
+        current_store_stats = detailed_stats['network_stats'][detailed_stats['network_stats']['Магазин'] == store]
+        if not current_store_stats.empty:
+            st.info(f"🏪 **Ваш магазин '{store}'** занимает позицию #{detailed_stats['network_stats'].index[detailed_stats['network_stats']['Магазин'] == store].tolist()[0] + 1} по выручке")
+    
+    with tab3:
+        st.write("**Топ-15 товаров по выручке в сегменте:**")
+        st.dataframe(detailed_stats['top_products'], use_container_width=True)
+        
+        # Проверяем, какие из топ товаров есть в магазине
+        store_products = store_data['Art'].unique()
+        top_in_store = detailed_stats['top_products'][detailed_stats['top_products']['Артикул'].isin(store_products)]
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("Топ товаров в вашем магазине", len(top_in_store))
+        with col2:
+            coverage_top = (len(top_in_store) / len(detailed_stats['top_products']) * 100)
+            st.metric("Покрытие топ товаров", f"{coverage_top:.1f}%")
+    
+    with tab4:
+        st.write("**Статистика продаж по месяцам:**")
+        st.dataframe(detailed_stats['monthly_stats'], use_container_width=True)
+        
+        # График месячной динамики
+        fig_monthly = px.bar(detailed_stats['monthly_stats'], x='Месяц', y='Выручка',
+                            title="Динамика выручки по месяцам")
+        st.plotly_chart(fig_monthly, use_container_width=True)
     
     # Жизненный цикл товаров
     st.subheader("🔄 Анализ жизненного цикла товаров")
@@ -471,6 +492,8 @@ def display_results(df, store, segment, recommendations, seasonality_data, lifec
         st.info(f"📈 **Пиковый месяц:** {seasonality_data['peak_month']}")
     with col2:
         st.info(f"📉 **Низкий месяц:** {seasonality_data['low_month']}")
+    
+    return detailed_stats
 
 def main():
     st.title("🛍️ Рекомендательная система товаров")
@@ -515,13 +538,10 @@ def main():
             
             # Отображение
             st.subheader("📈 Результаты анализа")
-            display_results(df, selected_store, selected_segment, recommendations, seasonality_data, lifecycle_df, alerts)
-            
-            # Система обратной связи
-            feedback_system()
+            detailed_stats = display_results(df, selected_store, selected_segment, recommendations, seasonality_data, lifecycle_df, alerts)
             
             # Скачивание отчета
-            excel_report = create_excel_report(df, selected_store, selected_segment, recommendations, abc_df, seasonality_data, lifecycle_df, alerts)
+            excel_report = create_excel_report(df, selected_store, selected_segment, recommendations, abc_df, seasonality_data, lifecycle_df, alerts, detailed_stats)report(df, selected_store, selected_segment, recommendations, abc_df, seasonality_data, lifecycle_df, alerts)
             st.download_button(
                 label="📊 Скачать полный отчет Excel",
                 data=excel_report.getvalue(),
