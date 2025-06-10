@@ -69,49 +69,94 @@ def calculate_abc_analysis(df, segment):
     })
     return abc_df
 
-def calculate_bcg_analysis(df, segment):
-    """BCG матрица для сегмента"""
+def analyze_product_lifecycle(df, segment):
+    """Анализ жизненного цикла товаров"""
     segment_data = df[df['Segment'] == segment]
     
-    # Разделяем данные на два периода для расчета роста
-    segment_data = segment_data.sort_values('Datasales')
-    mid_date = segment_data['Datasales'].quantile(0.5)
-    
-    period1 = segment_data[segment_data['Datasales'] <= mid_date]
-    period2 = segment_data[segment_data['Datasales'] > mid_date]
-    
-    sales1 = period1.groupby('Art')['Qty'].sum()
-    sales2 = period2.groupby('Art')['Qty'].sum()
-    
-    # Расчет роста и доли рынка
-    bcg_data = []
-    total_market = segment_data.groupby('Art')['Qty'].sum().sum()
+    # Группируем данные по товарам и месяцам
+    lifecycle_data = []
     
     for art in segment_data['Art'].unique():
-        s1 = sales1.get(art, 0)
-        s2 = sales2.get(art, 0)
-        growth = ((s2 - s1) / s1 * 100) if s1 > 0 else 0
-        market_share = segment_data[segment_data['Art'] == art]['Qty'].sum() / total_market * 100
+        product_data = segment_data[segment_data['Art'] == art]
+        monthly_sales = product_data.groupby('Month')['Qty'].sum()
         
-        # Определяем категорию BCG
-        if growth > 10 and market_share > 5:
-            category = 'Звезды'
-        elif growth <= 10 and market_share > 5:
-            category = 'Дойные коровы'
-        elif growth > 10 and market_share <= 5:
-            category = 'Знаки вопроса'
+        # Определяем стадию жизненного цикла
+        if len(monthly_sales) == 0:
+            continue
+            
+        total_sales = monthly_sales.sum()
+        max_sales = monthly_sales.max()
+        months_active = len(monthly_sales[monthly_sales > 0])
+        
+        # Логика определения стадии
+        if months_active <= 2:
+            stage = 'Внедрение'
+        elif monthly_sales.iloc[-3:].mean() > monthly_sales.iloc[:3].mean():
+            stage = 'Рост'
+        elif monthly_sales.std() < monthly_sales.mean() * 0.3:
+            stage = 'Зрелость'
         else:
-            category = 'Собаки'
+            stage = 'Спад'
         
-        bcg_data.append({
+        lifecycle_data.append({
             'Art': art,
-            'Growth': growth,
-            'Market_Share': market_share,
-            'BCG_Category': category,
-            'Describe': segment_data[segment_data['Art'] == art]['Describe'].iloc[0]
+            'Describe': product_data['Describe'].iloc[0],
+            'Total_Sales': total_sales,
+            'Months_Active': months_active,
+            'Stage': stage,
+            'Avg_Monthly_Sales': total_sales / months_active if months_active > 0 else 0
         })
     
-    return pd.DataFrame(bcg_data)
+    return pd.DataFrame(lifecycle_data)
+
+def generate_alerts(df, store, segment, recommendations):
+    """Генерация алертов и уведомлений"""
+    alerts = []
+    
+    # Алерт 1: Товары с резким падением продаж
+    recent_data = df[df['Datasales'] >= df['Datasales'].max() - pd.Timedelta(days=30)]
+    store_data = recent_data[(recent_data['Magazin'] == store) & (recent_data['Segment'] == segment)]
+    
+    if not store_data.empty:
+        recent_sales = store_data.groupby('Art')['Qty'].sum()
+        all_time_avg = df[(df['Magazin'] == store) & (df['Segment'] == segment)].groupby('Art')['Qty'].mean()
+        
+        for art in recent_sales.index:
+            if art in all_time_avg.index:
+                if recent_sales[art] < all_time_avg[art] * 0.5:
+                    product_name = df[df['Art'] == art]['Describe'].iloc[0]
+                    alerts.append({
+                        'type': 'warning',
+                        'title': 'Падение продаж',
+                        'message': f'Товар "{product_name}" ({art}) показывает падение продаж на 50%+',
+                        'priority': 'high'
+                    })
+    
+    # Алерт 2: Новые возможности
+    if not recommendations.empty:
+        top_opportunities = recommendations.head(3)
+        for _, row in top_opportunities.iterrows():
+            alerts.append({
+                'type': 'success',
+                'title': 'Новая возможность',
+                'message': f'Товар "{row["Describe"]}" ({row["Art"]}) имеет потенциал {int(row["Potential_Qty"])} продаж',
+                'priority': 'medium'
+            })
+    
+    # Алерт 3: Критически мало товаров в ассортименте
+    segment_data = df[df['Segment'] == segment]
+    store_data = df[(df['Magazin'] == store) & (df['Segment'] == segment)]
+    coverage = (store_data['Art'].nunique() / segment_data['Art'].nunique() * 100) if segment_data['Art'].nunique() > 0 else 0
+    
+    if coverage < 20:
+        alerts.append({
+            'type': 'error',
+            'title': 'Критически низкое покрытие',
+            'message': f'Покрытие ассортимента составляет только {coverage:.1f}%',
+            'priority': 'high'
+        })
+    
+    return alerts
 
 def calculate_seasonality(df, segment):
     """Анализ сезонности для сегмента"""
@@ -183,7 +228,83 @@ def generate_recommendations_with_abc(df, store, segment, min_network_qty=10, ma
     
     return recommendations.sort_values('Priority_Score', ascending=False)
 
-def create_excel_report(df, store, segment, recommendations, abc_df, bcg_df, seasonality_data):
+def create_ab_testing_scenarios(recommendations):
+    """Создание сценариев A/B тестирования"""
+    if recommendations.empty:
+        return {}
+    
+    scenarios = {
+        'Scenario A - Топ ABC': {
+            'strategy': 'Фокус на товарах категории A',
+            'products': recommendations[recommendations['ABC'] == 'A'].head(10),
+            'description': 'Концентрация на самых прибыльных товарах'
+        },
+        'Scenario B - Баланс': {
+            'strategy': 'Сбалансированный подход по всем категориям',
+            'products': recommendations.head(10),
+            'description': 'Равномерное распределение по ABC категориям'
+        },
+        'Scenario C - Высокий потенциал': {
+            'strategy': 'Товары с максимальным потенциалом продаж',
+            'products': recommendations.nlargest(10, 'Potential_Qty'),
+            'description': 'Фокус на товарах с наибольшим потенциалом количества продаж'
+        }
+    }
+    
+    return scenarios
+
+def feedback_system():
+    """Система обратной связи"""
+    st.subheader("📝 Система обратной связи")
+    
+    # Инициализация session state для отзывов
+    if 'feedback_data' not in st.session_state:
+        st.session_state.feedback_data = []
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.write("**Оцените рекомендации:**")
+        product_art = st.text_input("Артикул товара:")
+        rating = st.select_slider("Оценка эффективности:", 
+                                options=[1, 2, 3, 4, 5], 
+                                format_func=lambda x: "⭐" * x)
+        
+        success = st.selectbox("Результат внедрения:", 
+                              ["Выберите...", "Успешно", "Частично успешно", "Неуспешно"])
+        
+        comment = st.text_area("Комментарий:")
+        
+        if st.button("💾 Сохранить отзыв"):
+            if product_art and success != "Выберите...":
+                feedback = {
+                    'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    'product_art': product_art,
+                    'rating': rating,
+                    'success': success,
+                    'comment': comment
+                }
+                st.session_state.feedback_data.append(feedback)
+                st.success("✅ Отзыв сохранен!")
+            else:
+                st.error("Заполните обязательные поля")
+    
+    with col2:
+        st.write("**История отзывов:**")
+        if st.session_state.feedback_data:
+            feedback_df = pd.DataFrame(st.session_state.feedback_data)
+            st.dataframe(feedback_df, use_container_width=True)
+            
+            # Статистика по отзывам
+            avg_rating = feedback_df['rating'].mean()
+            success_rate = (feedback_df['success'] == 'Успешно').sum() / len(feedback_df) * 100
+            
+            st.metric("Средняя оценка", f"{avg_rating:.1f}⭐")
+            st.metric("Успешность", f"{success_rate:.1f}%")
+        else:
+            st.info("Отзывов пока нет")
+
+def create_excel_report(df, store, segment, recommendations, abc_df, seasonality_data, lifecycle_df, alerts):
     """Создание Excel отчета"""
     output = BytesIO()
     
@@ -212,8 +333,8 @@ def create_excel_report(df, store, segment, recommendations, abc_df, bcg_df, sea
         })
         stats.to_excel(writer, sheet_name='Статистика', index=False)
         
-        # Лист 3: BCG матрица
-        bcg_df.to_excel(writer, sheet_name='BCG Матрица', index=False)
+        # Лист 3: Жизненный цикл товаров
+        lifecycle_df.to_excel(writer, sheet_name='Жизненный цикл', index=False)
         
         # Лист 4: Сезонность
         season_df = pd.DataFrame({
@@ -221,12 +342,37 @@ def create_excel_report(df, store, segment, recommendations, abc_df, bcg_df, sea
             'Продажи': seasonality_data['sales']
         })
         season_df.to_excel(writer, sheet_name='Сезонность', index=False)
+        
+        # Лист 5: Алерты
+        if alerts:
+            alerts_df = pd.DataFrame(alerts)
+            alerts_df.to_excel(writer, sheet_name='Алерты', index=False)
     
     output.seek(0)
     return output
 
-def display_results(df, store, segment, recommendations, bcg_df, seasonality_data):
+def display_alerts(alerts):
+    """Отображение алертов"""
+    if not alerts:
+        return
+    
+    st.subheader("🚨 Алерты и уведомления")
+    
+    for alert in alerts:
+        if alert['type'] == 'error':
+            st.error(f"**{alert['title']}**: {alert['message']}")
+        elif alert['type'] == 'warning':
+            st.warning(f"**{alert['title']}**: {alert['message']}")
+        elif alert['type'] == 'success':
+            st.success(f"**{alert['title']}**: {alert['message']}")
+        else:
+            st.info(f"**{alert['title']}**: {alert['message']}")
+
+def display_results(df, store, segment, recommendations, seasonality_data, lifecycle_df, alerts):
     """Отображение результатов"""
+    # Алерты
+    display_alerts(alerts)
+    
     # Статистика
     segment_data = df[df['Segment'] == segment]
     store_data = df[(df['Magazin'] == store) & (df['Segment'] == segment)]
@@ -267,25 +413,49 @@ def display_results(df, store, segment, recommendations, bcg_df, seasonality_dat
     else:
         st.info("Рекомендации не найдены. Попробуйте изменить параметры.")
     
-    # BCG матрица
-    st.subheader("📊 BCG Матрица")
-    if not bcg_df.empty:
-        fig = px.scatter(bcg_df, x='Market_Share', y='Growth', color='BCG_Category',
-                        hover_data=['Art', 'Describe'], title="BCG Матрица товаров",
-                        labels={'Market_Share': 'Доля рынка (%)', 'Growth': 'Рост продаж (%)'})
-        fig.add_hline(y=10, line_dash="dash", line_color="gray")
-        fig.add_vline(x=5, line_dash="dash", line_color="gray")
-        st.plotly_chart(fig, use_container_width=True)
+    # A/B тестирование сценариев
+    st.subheader("🧪 A/B Тестирование стратегий")
+    ab_scenarios = create_ab_testing_scenarios(recommendations)
+    
+    if ab_scenarios:
+        scenario_tabs = st.tabs(list(ab_scenarios.keys()))
         
-        # Сводка BCG
-        bcg_summary = bcg_df['BCG_Category'].value_counts()
+        for i, (scenario_name, scenario_data) in enumerate(ab_scenarios.items()):
+            with scenario_tabs[i]:
+                st.write(f"**Стратегия:** {scenario_data['strategy']}")
+                st.write(f"**Описание:** {scenario_data['description']}")
+                
+                if not scenario_data['products'].empty:
+                    scenario_summary = scenario_data['products'][['Art', 'Describe', 'Potential_Qty', 'ABC']].copy()
+                    scenario_summary.columns = ['Артикул', 'Описание', 'Потенциал', 'ABC']
+                    st.dataframe(scenario_summary, use_container_width=True)
+                    
+                    total_potential = scenario_data['products']['Potential_Qty'].sum()
+                    st.metric("Общий потенциал сценария", f"{int(total_potential)} шт")
+    
+    # Жизненный цикл товаров
+    st.subheader("🔄 Анализ жизненного цикла товаров")
+    if not lifecycle_df.empty:
+        # Сводка по стадиям
+        stage_summary = lifecycle_df['Stage'].value_counts()
+        
         col1, col2, col3, col4 = st.columns(4)
-        categories = ['Звезды', 'Дойные коровы', 'Знаки вопроса', 'Собаки']
-        colors = ['🌟', '🐄', '❓', '🐕']
+        stages = ['Внедрение', 'Рост', 'Зрелость', 'Спад']
+        icons = ['🚀', '📈', '⚖️', '📉']
         
-        for i, (cat, color) in enumerate(zip(categories, colors)):
+        for i, (stage, icon) in enumerate(zip(stages, icons)):
             with [col1, col2, col3, col4][i]:
-                st.metric(f"{color} {cat}", bcg_summary.get(cat, 0))
+                st.metric(f"{icon} {stage}", stage_summary.get(stage, 0))
+        
+        # Детальная таблица
+        lifecycle_display = lifecycle_df[['Art', 'Describe', 'Stage', 'Total_Sales', 'Months_Active']].copy()
+        lifecycle_display.columns = ['Артикул', 'Описание', 'Стадия', 'Всего продаж', 'Месяцев активности']
+        st.dataframe(lifecycle_display, use_container_width=True)
+        
+        # График распределения по стадиям
+        fig_lifecycle = px.pie(values=stage_summary.values, names=stage_summary.index,
+                              title="Распределение товаров по стадиям жизненного цикла")
+        st.plotly_chart(fig_lifecycle, use_container_width=True)
     
     # Сезонность
     st.subheader("📅 Анализ сезонности")
@@ -304,7 +474,7 @@ def display_results(df, store, segment, recommendations, bcg_df, seasonality_dat
 
 def main():
     st.title("🛍️ Рекомендательная система товаров")
-    st.markdown("Система с ABC/BCG анализом и сезонностью")
+    st.markdown("Система с ABC анализом, алертами, A/B тестированием и анализом жизненного цикла")
     
     uploaded_file = st.file_uploader("Загрузите Excel файл", type=['xlsx', 'xls'])
     
@@ -339,15 +509,19 @@ def main():
             # Расчеты
             recommendations = generate_recommendations_with_abc(df, selected_store, selected_segment, min_network_qty, max_store_qty)
             abc_df = calculate_abc_analysis(df, selected_segment)
-            bcg_df = calculate_bcg_analysis(df, selected_segment)
             seasonality_data = calculate_seasonality(df, selected_segment)
+            lifecycle_df = analyze_product_lifecycle(df, selected_segment)
+            alerts = generate_alerts(df, selected_store, selected_segment, recommendations)
             
             # Отображение
             st.subheader("📈 Результаты анализа")
-            display_results(df, selected_store, selected_segment, recommendations, bcg_df, seasonality_data)
+            display_results(df, selected_store, selected_segment, recommendations, seasonality_data, lifecycle_df, alerts)
+            
+            # Система обратной связи
+            feedback_system()
             
             # Скачивание отчета
-            excel_report = create_excel_report(df, selected_store, selected_segment, recommendations, abc_df, bcg_df, seasonality_data)
+            excel_report = create_excel_report(df, selected_store, selected_segment, recommendations, abc_df, seasonality_data, lifecycle_df, alerts)
             st.download_button(
                 label="📊 Скачать полный отчет Excel",
                 data=excel_report.getvalue(),
