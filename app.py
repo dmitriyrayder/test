@@ -762,25 +762,28 @@ def display_results(df, store, segment, recommendations, seasonality_data, lifec
     stats_table = create_statistics_table(df, store, segment, recommendations, abc_df, lifecycle_df)
     
     if not stats_table.empty:
-        categories = stats_table['Категория'].unique()
+        categories = stats_table['Категория'].unique().tolist()
         
-        tabs = st.tabs(categories)
-        
-        for i, category in enumerate(categories):
-            with tabs[i]:
-                category_data = stats_table[stats_table['Категория'] == category]
-                category_display = category_data[['Показатель', 'Значение']].copy()
-                
-                # Красивое отображение таблицы
-                st.dataframe(
-                    category_display,
-                    use_container_width=True,
-                    hide_index=True,
-                    column_config={
-                        "Показатель": st.column_config.TextColumn("Показатель", width="medium"),
-                        "Значение": st.column_config.TextColumn("Значение", width="medium")
-                    }
-                )
+        if len(categories) > 0:
+            tabs = st.tabs(categories)
+            
+            for i, category in enumerate(categories):
+                with tabs[i]:
+                    category_data = stats_table[stats_table['Категория'] == category]
+                    category_display = category_data[['Показатель', 'Значение']].copy()
+                    
+                    # Красивое отображение таблицы
+                    st.dataframe(
+                        category_display,
+                        use_container_width=True,
+                        hide_index=True,
+                        column_config={
+                            "Показатель": st.column_config.TextColumn("Показатель", width="medium"),
+                            "Значение": st.column_config.TextColumn("Значение", width="medium")
+                        }
+                    )
+        else:
+            st.info("Нет данных для отображения статистики")
 
 def main():
     # Заголовок
