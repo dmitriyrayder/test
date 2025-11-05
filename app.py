@@ -901,6 +901,10 @@ def main():
             df = load_and_process_data(uploaded_file)
 
     else:  # Google Sheets
+        # Инициализация session_state для хранения данных
+        if 'google_sheets_data' not in st.session_state:
+            st.session_state.google_sheets_data = None
+
         # Поле для ввода URL
         sheet_url = st.text_input(
             "URL Google Sheets:",
@@ -926,9 +930,23 @@ def main():
                 """)
             return
 
-        # Загрузка данных из Google Sheets
-        with st.spinner("⏳ Загрузка и обработка данных из Google Sheets..."):
-            df = load_data_from_google_sheets(sheet_url)
+        # Кнопка для загрузки данных
+        load_button = st.button("📊 Загрузить данные из Google Sheets", type="primary")
+
+        if load_button:
+            with st.spinner("⏳ Загрузка и обработка данных из Google Sheets..."):
+                loaded_df = load_data_from_google_sheets(sheet_url)
+                if loaded_df is not None:
+                    st.session_state.google_sheets_data = loaded_df
+                    st.rerun()
+
+        # Проверка наличия загруженных данных
+        if st.session_state.google_sheets_data is None:
+            st.info("👆 Нажмите кнопку для загрузки данных")
+            return
+
+        # Использование данных из session_state
+        df = st.session_state.google_sheets_data
     
     if df is None:
         return
