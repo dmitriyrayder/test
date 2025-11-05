@@ -874,6 +874,275 @@ def display_results(df, store, segment, recommendations, seasonality_data, lifec
         else:
             st.info("Нет данных для отображения статистики")
 
+    st.divider()
+
+    # ML-рекомендации
+    st.subheader("🤖 Интеллектуальные рекомендации (ML/DS анализ)")
+
+    # Генерация ML-инсайтов
+    ml_insights = generate_ml_recommendations(df, store, segment, recommendations, abc_df, lifecycle_df, seasonality_data)
+
+    if ml_insights:
+        # Приоритетные действия
+        st.markdown("### 🎯 Приоритетные действия")
+
+        priority_actions = [insight for insight in ml_insights if insight['priority'] == 'high']
+        if priority_actions:
+            for action in priority_actions:
+                st.warning(f"**{action['title']}**\n\n{action['recommendation']}")
+
+        # Стратегические рекомендации
+        st.markdown("### 📊 Стратегические рекомендации")
+
+        strategic_actions = [insight for insight in ml_insights if insight['priority'] == 'medium']
+        if strategic_actions:
+            for action in strategic_actions:
+                st.info(f"**{action['title']}**\n\n{action['recommendation']}")
+
+        # Дополнительные инсайты
+        st.markdown("### 💡 Дополнительные инсайты")
+
+        low_priority = [insight for insight in ml_insights if insight['priority'] == 'low']
+        if low_priority:
+            for action in low_priority:
+                st.success(f"**{action['title']}**\n\n{action['recommendation']}")
+    else:
+        st.info("Недостаточно данных для генерации ML-рекомендаций")
+
+def generate_ml_recommendations(df, store, segment, recommendations, abc_df, lifecycle_df, seasonality_data):
+    """Генерация ML-рекомендаций на основе анализа данных"""
+    insights = []
+
+    # Данные для анализа
+    segment_data = df[df['Segment'] == segment]
+    store_data = df[(df['Magazin'] == store) & (df['Segment'] == segment)]
+
+    segment_unique = segment_data['Art'].nunique()
+    store_unique = store_data['Art'].nunique()
+    coverage = (store_unique / segment_unique * 100) if segment_unique > 0 else 0
+
+    # 1. Анализ покрытия ассортимента
+    if coverage < 30:
+        insights.append({
+            'title': 'Критически низкое покрытие ассортимента',
+            'recommendation': f"""
+Текущее покрытие: **{coverage:.1f}%** (только {store_unique} из {segment_unique} товаров).
+
+**Рекомендуемые действия:**
+- Срочно расширить ассортимент на {max(10, int(segment_unique * 0.2 - store_unique))} SKU
+- Приоритет: товары категории A из рекомендаций
+- Ожидаемый рост выручки: {int(recommendations['Potential_Sum'].head(10).sum()) if not recommendations.empty else 'N/A'} грн/мес
+            """,
+            'priority': 'high'
+        })
+    elif coverage < 50:
+        insights.append({
+            'title': 'Потенциал расширения ассортимента',
+            'recommendation': f"""
+Текущее покрытие: **{coverage:.1f}%**. Есть значительный потенциал роста.
+
+**Рекомендация:** Добавить {int(segment_unique * 0.4 - store_unique)} товаров категории A и B.
+            """,
+            'priority': 'medium'
+        })
+
+    # 2. ABC анализ рекомендаций
+    if not recommendations.empty and 'ABC' in recommendations.columns:
+        a_products = len(recommendations[recommendations['ABC'] == 'A'])
+        b_products = len(recommendations[recommendations['ABC'] == 'B'])
+
+        if a_products > 0:
+            a_potential = recommendations[recommendations['ABC'] == 'A']['Potential_Sum'].sum()
+            insights.append({
+                'title': f'Высокий потенциал категории A ({a_products} товаров)',
+                'recommendation': f"""
+Обнаружено **{a_products} товаров** категории A (топ по выручке) отсутствующих в магазине.
+
+**Потенциал выручки:** {a_potential:,.0f} грн/мес
+
+**Приоритет внедрения:**
+1. Топ-5 товаров с максимальным потенциалом
+2. Товары на стадии "Рост" или "Зрелость"
+3. Учёт сезонности при планировании закупок
+                """,
+                'priority': 'high'
+            })
+
+    # 3. Анализ жизненного цикла
+    if not lifecycle_df.empty:
+        growth_products = len(lifecycle_df[lifecycle_df['Stage'] == 'Рост'])
+        mature_products = len(lifecycle_df[lifecycle_df['Stage'] == 'Зрелость'])
+        declining_products = len(lifecycle_df[lifecycle_df['Stage'] == 'Спад'])
+
+        # Товары в магазине на стадии спада
+        store_arts = store_data['Art'].unique()
+        declining_in_store = lifecycle_df[
+            (lifecycle_df['Stage'] == 'Спад') &
+            (lifecycle_df['Art'].isin(store_arts))
+        ]
+
+        if len(declining_in_store) > 3:
+            insights.append({
+                'title': 'Обновление ассортимента: замена устаревших товаров',
+                'recommendation': f"""
+В магазине **{len(declining_in_store)} товаров** на стадии спада.
+
+**Стратегия замены:**
+- Постепенно выводить товары на стадии спада
+- Заменить на товары категории "Рост" ({growth_products} доступно)
+- Приоритет: товары с падением продаж > 50%
+
+**Ожидаемый эффект:** Увеличение оборачиваемости и снижение мёртвого остатка
+                """,
+                'priority': 'high'
+            })
+
+        # Фокус на растущие товары
+        if growth_products > 5 and not recommendations.empty:
+            growth_recommendations = recommendations.merge(
+                lifecycle_df[lifecycle_df['Stage'] == 'Рост'][['Art']],
+                on='Art',
+                how='inner'
+            )
+
+            if not growth_recommendations.empty:
+                insights.append({
+                    'title': 'Растущий тренд: добавить товары на стадии роста',
+                    'recommendation': f"""
+Обнаружено **{len(growth_recommendations)} товаров** на стадии активного роста, отсутствующих в магазине.
+
+**Преимущества:**
+- Высокий потенциал увеличения продаж
+- Растущий спрос в сети
+- Низкий риск затоваривания
+
+**Топ-3 рекомендации:** {', '.join(growth_recommendations.head(3)['Art'].astype(str).tolist())}
+                    """,
+                    'priority': 'medium'
+                })
+
+    # 4. Сезонный анализ
+    if seasonality_data and seasonality_data.get('peak_month') != 'Нет данных':
+        peak_month = seasonality_data['peak_month']
+        low_month = seasonality_data['low_month']
+        peak_idx = seasonality_data['months'].index(peak_month)
+        peak_sales = seasonality_data['sales'][peak_idx]
+
+        # Определяем текущий месяц (можно улучшить)
+        from datetime import datetime
+        current_month_num = datetime.now().month
+        month_names_map = {
+            'Янв': 1, 'Фев': 2, 'Мар': 3, 'Апр': 4, 'Май': 5, 'Июн': 6,
+            'Июл': 7, 'Авг': 8, 'Сен': 9, 'Окт': 10, 'Ноя': 11, 'Дек': 12
+        }
+        peak_month_num = month_names_map.get(peak_month, 0)
+
+        # Если до пикового месяца осталось 1-2 месяца
+        months_to_peak = (peak_month_num - current_month_num) % 12
+
+        if 1 <= months_to_peak <= 2:
+            insights.append({
+                'title': f'Подготовка к сезонному пику ({peak_month})',
+                'recommendation': f"""
+Через {months_to_peak} мес. ожидается пиковый сезон продаж в сегменте "{segment}".
+
+**План действий:**
+1. **Немедленно:** Увеличить заказ товаров на 30-50%
+2. **Фокус:** Товары категории A с учётом сезонного индекса
+3. **Прогноз:** Рост продаж до {int(peak_sales)} шт/мес (+{int((peak_sales / (sum(seasonality_data['sales'])/12) - 1) * 100)}% от среднего)
+
+**Риск:** Упущенная выручка при недостаточном запасе в пиковый сезон
+                """,
+                'priority': 'high'
+            })
+
+        # Общая сезонная рекомендация
+        seasonality_variance = max(seasonality_data['seasonality_index']) - min(seasonality_data['seasonality_index'])
+        if seasonality_variance > 50:
+            insights.append({
+                'title': 'Высокая сезонность: адаптивное планирование',
+                'recommendation': f"""
+Сегмент имеет **высокую сезонность** (разброс индекса: {seasonality_variance:.0f} пунктов).
+
+**Рекомендации по закупкам:**
+- **{peak_month}:** Увеличить запас на 50-80%
+- **{low_month}:** Минимизировать остатки, распродажа старых позиций
+- Использовать динамическое ценообразование
+
+**Инструменты:** Автоматизация прогнозов с учётом сезонности (SARIMA, Prophet)
+                """,
+                'priority': 'medium'
+            })
+
+    # 5. Потенциал выручки
+    if not recommendations.empty:
+        total_potential = recommendations['Potential_Sum'].sum()
+        top_10_potential = recommendations.head(10)['Potential_Sum'].sum()
+
+        if total_potential > 10000:
+            insights.append({
+                'title': 'Анализ ROI: максимизация выручки',
+                'recommendation': f"""
+**Общий потенциал выручки:** {total_potential:,.0f} грн/мес
+
+**Стратегия 80/20 (принцип Парето):**
+- Топ-10 товаров дают **{top_10_potential:,.0f} грн/мес** ({(top_10_potential/total_potential*100):.1f}% от общего потенциала)
+- Рекомендуем начать с этих 10 SKU для быстрого ROI
+- Постепенно расширять ассортимент по мере роста продаж
+
+**Прогнозируемый срок окупаемости:** 2-3 месяца
+                """,
+                'priority': 'medium'
+            })
+
+    # 6. Анализ конкурентов (косвенно через покрытие других магазинов)
+    if not recommendations.empty and 'Store_Count' in recommendations.columns:
+        high_coverage_products = recommendations[recommendations['Store_Count'] >= segment_data['Magazin'].nunique() * 0.5]
+
+        if not high_coverage_products.empty:
+            insights.append({
+                'title': 'Конкурентное отставание по популярным товарам',
+                'recommendation': f"""
+Обнаружено **{len(high_coverage_products)} товаров**, которые есть в более чем 50% магазинов сети, но отсутствуют в вашем магазине.
+
+**Риски:**
+- Потеря клиентов к конкурентам
+- Недополучение выручки на "ходовых" товарах
+- Снижение лояльности покупателей
+
+**Действие:** Срочно добавить топ-5 товаров с максимальным покрытием в сети
+                """,
+                'priority': 'high'
+            })
+
+    # 7. Диверсификация портфеля
+    if not recommendations.empty:
+        # Проверяем концентрацию рекомендаций по категориям ABC
+        if 'ABC' in recommendations.columns:
+            a_share = len(recommendations[recommendations['ABC'] == 'A']) / len(recommendations) * 100
+            b_share = len(recommendations[recommendations['ABC'] == 'B']) / len(recommendations) * 100
+            c_share = len(recommendations[recommendations['ABC'] == 'C']) / len(recommendations) * 100
+
+            insights.append({
+                'title': 'Оптимальный портфель товаров',
+                'recommendation': f"""
+**Текущее распределение рекомендаций:**
+- Категория A: {a_share:.1f}%
+- Категория B: {b_share:.1f}%
+- Категория C: {c_share:.1f}%
+
+**Рекомендуемое распределение (по методу ABC):**
+- 20% товаров категории A → 80% выручки
+- 30% товаров категории B → 15% выручки
+- 50% товаров категории C → 5% выручки
+
+**Стратегия внедрения:** Начать с категории A, постепенно добавлять B и C для полноты ассортимента
+                """,
+                'priority': 'low'
+            })
+
+    return insights
+
 def main():
     # Заголовок
     st.title("🛍️ Рекомендательная система товаров, которая предлагает магазину перечень товаров, которые хорошо продаются в сети,но еще не представлены в данном магазине")
