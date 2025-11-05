@@ -901,8 +901,6 @@ def main():
             df = load_and_process_data(uploaded_file)
 
     else:  # Google Sheets
-        st.info("🌐 Введите URL публичной Google Sheets таблицы")
-
         # Поле для ввода URL
         sheet_url = st.text_input(
             "URL Google Sheets:",
@@ -911,7 +909,7 @@ def main():
         )
 
         if not sheet_url:
-            st.warning("👆 Введите URL таблицы Google Sheets")
+            st.info("👆 Введите URL таблицы Google Sheets для начала работы")
             with st.expander("ℹ️ Как получить публичный доступ к таблице?"):
                 st.markdown("""
                 **Инструкция:**
@@ -928,15 +926,9 @@ def main():
                 """)
             return
 
-        # Кнопка для загрузки данных
-        load_button = st.button("📊 Загрузить данные из Google Sheets", type="primary")
-
-        if load_button:
-            with st.spinner("⏳ Загрузка и обработка данных из Google Sheets..."):
-                df = load_data_from_google_sheets(sheet_url)
-        else:
-            st.info("👆 Нажмите кнопку для загрузки данных")
-            return
+        # Загрузка данных из Google Sheets
+        with st.spinner("⏳ Загрузка и обработка данных из Google Sheets..."):
+            df = load_data_from_google_sheets(sheet_url)
     
     if df is None:
         return
