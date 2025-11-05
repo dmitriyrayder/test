@@ -24,20 +24,28 @@ def load_and_process_data(uploaded_file):
             return None
         
         # Обработка дат
+        # Сохраняем оригинальный столбец для повторных попыток парсинга
+        datasales_original = df['Datasales'].copy()
         date_formats = ['%d.%m.%Y', '%d/%m/%Y', '%Y-%m-%d', '%d-%m-%Y', '%d.%m.%y', '%d/%m/%y']
         df['Datasales'] = pd.to_datetime(df['Datasales'], errors='coerce')
-        
+
         if df['Datasales'].isna().all():
             for fmt in date_formats:
                 try:
-                    df['Datasales'] = pd.to_datetime(df['Datasales'], format=fmt, errors='coerce')
+                    # Применяем формат к ОРИГИНАЛЬНЫМ строковым значениям
+                    df['Datasales'] = pd.to_datetime(datasales_original, format=fmt, errors='coerce')
                     if not df['Datasales'].isna().all():
                         break
                 except:
                     continue
-        
+
         # Очистка данных
         df = df.dropna(subset=['Art', 'Magazin', 'Segment', 'Datasales'])
+
+        # Проверка, остались ли данные после очистки
+        if df.empty:
+            st.error("После обработки не осталось валидных данных. Проверьте формат данных в файле.")
+            return None
         
         # Конвертация числовых колонок
         for col in ['Qty', 'Price', 'Sum']:
@@ -47,16 +55,97 @@ def load_and_process_data(uploaded_file):
         df = df[df['Qty'] > 0]  # Только положительные продажи
         df = df[df['Price'] > 0]  # Только положительные цены
         df = df.drop_duplicates()
-        
+
+        # Проверка после фильтрации
+        if df.empty:
+            st.error("После фильтрации не осталось данных. Проверьте, что есть записи с положительными Qty и Price.")
+            return None
+
         # Добавление временных признаков
         df['Month'] = df['Datasales'].dt.month
         df['Year'] = df['Datasales'].dt.year
         df['Week'] = df['Datasales'].dt.isocalendar().week
-        
+
         return df
         
     except Exception as e:
         st.error(f"Ошибка загрузки данных: {str(e)}")
+        return None
+
+@st.cache_data
+def load_data_from_google_sheets(sheet_url):
+    """Загрузка данных из публичной Google Sheets таблицы"""
+    try:
+        # Извлечение ID таблицы из URL
+        import re
+        match = re.search(r'/spreadsheets/d/([a-zA-Z0-9-_]+)', sheet_url)
+        if not match:
+            st.error("Неверный формат URL Google Sheets")
+            return None
+
+        sheet_id = match.group(1)
+
+        # Формирование URL для экспорта в CSV формате
+        export_url = f'https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv'
+
+        # Загрузка данных
+        df = pd.read_csv(export_url)
+
+        # Проверка обязательных колонок
+        required_cols = ['Magazin', 'Datasales', 'Art', 'Describe', 'Model', 'Segment', 'Price', 'Qty', 'Sum']
+        missing_cols = [col for col in required_cols if col not in df.columns]
+
+        if missing_cols:
+            st.error(f"Отсутствуют колонки: {missing_cols}")
+            return None
+
+        # Обработка дат
+        # Сохраняем оригинальный столбец для повторных попыток парсинга
+        datasales_original = df['Datasales'].copy()
+        date_formats = ['%d.%m.%Y', '%d/%m/%Y', '%Y-%m-%d', '%d-%m-%Y', '%d.%m.%y', '%d/%m/%y']
+        df['Datasales'] = pd.to_datetime(df['Datasales'], errors='coerce')
+
+        if df['Datasales'].isna().all():
+            for fmt in date_formats:
+                try:
+                    # Применяем формат к ОРИГИНАЛЬНЫМ строковым значениям
+                    df['Datasales'] = pd.to_datetime(datasales_original, format=fmt, errors='coerce')
+                    if not df['Datasales'].isna().all():
+                        break
+                except:
+                    continue
+
+        # Очистка данных
+        df = df.dropna(subset=['Art', 'Magazin', 'Segment', 'Datasales'])
+
+        # Проверка, остались ли данные после очистки
+        if df.empty:
+            st.error("После обработки не осталось валидных данных. Проверьте формат данных в таблице.")
+            return None
+
+        # Конвертация числовых колонок
+        for col in ['Qty', 'Price', 'Sum']:
+            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+
+        # Удаление дубликатов и некорректных данных
+        df = df[df['Qty'] > 0]  # Только положительные продажи
+        df = df[df['Price'] > 0]  # Только положительные цены
+        df = df.drop_duplicates()
+
+        # Проверка после фильтрации
+        if df.empty:
+            st.error("После фильтрации не осталось данных. Проверьте, что в таблице есть записи с положительными Qty и Price.")
+            return None
+
+        # Добавление временных признаков
+        df['Month'] = df['Datasales'].dt.month
+        df['Year'] = df['Datasales'].dt.year
+        df['Week'] = df['Datasales'].dt.isocalendar().week
+
+        return df
+
+    except Exception as e:
+        st.error(f"Ошибка загрузки данных из Google Sheets: {str(e)}")
         return None
 
 def calculate_abc_analysis(df, segment):
@@ -796,35 +885,94 @@ def main():
     - **Интеллектуальные алерты** - уведомления о важных событиях
     """)
     
-    # Загрузка файла
-    uploaded_file = st.file_uploader(
-        "📁 Загрузите Excel файл с данными о продажах",
-        type=['xlsx', 'xls'],
-        help="Файл должен содержать колонки: Magazin, Datasales, Art, Describe, Model, Segment, Price, Qty, Sum"
+    # Выбор источника данных
+    st.subheader("📥 Источник данных")
+    data_source = st.radio(
+        "Выберите источник данных:",
+        options=["Локальный файл", "Google Sheets"],
+        horizontal=True
     )
-    
-    if uploaded_file is None:
-        st.info("👆 Загрузите Excel файл для начала работы")
-        with st.expander("ℹ️ Требования к формату данных"):
-            st.markdown("""
-            **Обязательные колонки:**
-            - `Magazin` - название магазина
-            - `Datasales` - дата продажи
-            - `Art` - артикул товара
-            - `Describe` - описание товара
-            - `Model` - модель товара
-            - `Segment` - сегмент товара
-            - `Price` - цена
-            - `Qty` - количество
-            - `Sum` - сумма продажи
-            
-            **Форматы дат:** DD.MM.YYYY, DD/MM/YYYY, YYYY-MM-DD
-            """)
-        return
-    
-    # Загрузка данных
-    with st.spinner("⏳ Загрузка и обработка данных..."):
-        df = load_and_process_data(uploaded_file)
+
+    df = None
+
+    if data_source == "Локальный файл":
+        # Загрузка файла
+        uploaded_file = st.file_uploader(
+            "📁 Загрузите Excel файл с данными о продажах",
+            type=['xlsx', 'xls'],
+            help="Файл должен содержать колонки: Magazin, Datasales, Art, Describe, Model, Segment, Price, Qty, Sum"
+        )
+
+        if uploaded_file is None:
+            st.info("👆 Загрузите Excel файл для начала работы")
+            with st.expander("ℹ️ Требования к формату данных"):
+                st.markdown("""
+                **Обязательные колонки:**
+                - `Magazin` - название магазина
+                - `Datasales` - дата продажи
+                - `Art` - артикул товара
+                - `Describe` - описание товара
+                - `Model` - модель товара
+                - `Segment` - сегмент товара
+                - `Price` - цена
+                - `Qty` - количество
+                - `Sum` - сумма продажи
+
+                **Форматы дат:** DD.MM.YYYY, DD/MM/YYYY, YYYY-MM-DD
+                """)
+            return
+
+        # Загрузка данных из файла
+        with st.spinner("⏳ Загрузка и обработка данных..."):
+            df = load_and_process_data(uploaded_file)
+
+    else:  # Google Sheets
+        # Инициализация session_state для хранения данных
+        if 'google_sheets_data' not in st.session_state:
+            st.session_state.google_sheets_data = None
+
+        # Поле для ввода URL
+        sheet_url = st.text_input(
+            "URL Google Sheets:",
+            value="https://docs.google.com/spreadsheets/d/1lJLON5N_EKQ5ICv0Pprp5DamP1tNAhBIph4uEoWC04Q/edit?gid=64159818#gid=64159818",
+            help="Таблица должна быть открыта для просмотра (публичный доступ)"
+        )
+
+        if not sheet_url:
+            st.info("👆 Введите URL таблицы Google Sheets для начала работы")
+            with st.expander("ℹ️ Как получить публичный доступ к таблице?"):
+                st.markdown("""
+                **Инструкция:**
+                1. Откройте вашу таблицу в Google Sheets
+                2. Нажмите кнопку "Настройки доступа" (справа вверху)
+                3. Выберите "Все, у кого есть ссылка"
+                4. Установите права "Читатель"
+                5. Скопируйте ссылку на таблицу
+
+                **Обязательные колонки:**
+                - `Magazin`, `Datasales`, `Art`, `Describe`, `Model`, `Segment`, `Price`, `Qty`, `Sum`
+
+                **Форматы дат:** DD.MM.YYYY, DD/MM/YYYY, YYYY-MM-DD
+                """)
+            return
+
+        # Кнопка для загрузки данных
+        load_button = st.button("📊 Загрузить данные из Google Sheets", type="primary")
+
+        if load_button:
+            with st.spinner("⏳ Загрузка и обработка данных из Google Sheets..."):
+                loaded_df = load_data_from_google_sheets(sheet_url)
+                if loaded_df is not None:
+                    st.session_state.google_sheets_data = loaded_df
+                    st.rerun()
+
+        # Проверка наличия загруженных данных
+        if st.session_state.google_sheets_data is None:
+            st.info("👆 Нажмите кнопку для загрузки данных")
+            return
+
+        # Использование данных из session_state
+        df = st.session_state.google_sheets_data
     
     if df is None:
         return
