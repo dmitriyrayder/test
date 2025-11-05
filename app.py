@@ -24,20 +24,28 @@ def load_and_process_data(uploaded_file):
             return None
         
         # Обработка дат
+        # Сохраняем оригинальный столбец для повторных попыток парсинга
+        datasales_original = df['Datasales'].copy()
         date_formats = ['%d.%m.%Y', '%d/%m/%Y', '%Y-%m-%d', '%d-%m-%Y', '%d.%m.%y', '%d/%m/%y']
         df['Datasales'] = pd.to_datetime(df['Datasales'], errors='coerce')
-        
+
         if df['Datasales'].isna().all():
             for fmt in date_formats:
                 try:
-                    df['Datasales'] = pd.to_datetime(df['Datasales'], format=fmt, errors='coerce')
+                    # Применяем формат к ОРИГИНАЛЬНЫМ строковым значениям
+                    df['Datasales'] = pd.to_datetime(datasales_original, format=fmt, errors='coerce')
                     if not df['Datasales'].isna().all():
                         break
                 except:
                     continue
-        
+
         # Очистка данных
         df = df.dropna(subset=['Art', 'Magazin', 'Segment', 'Datasales'])
+
+        # Проверка, остались ли данные после очистки
+        if df.empty:
+            st.error("После обработки не осталось валидных данных. Проверьте формат данных в файле.")
+            return None
         
         # Конвертация числовых колонок
         for col in ['Qty', 'Price', 'Sum']:
@@ -47,12 +55,17 @@ def load_and_process_data(uploaded_file):
         df = df[df['Qty'] > 0]  # Только положительные продажи
         df = df[df['Price'] > 0]  # Только положительные цены
         df = df.drop_duplicates()
-        
+
+        # Проверка после фильтрации
+        if df.empty:
+            st.error("После фильтрации не осталось данных. Проверьте, что есть записи с положительными Qty и Price.")
+            return None
+
         # Добавление временных признаков
         df['Month'] = df['Datasales'].dt.month
         df['Year'] = df['Datasales'].dt.year
         df['Week'] = df['Datasales'].dt.isocalendar().week
-        
+
         return df
         
     except Exception as e:
@@ -87,13 +100,16 @@ def load_data_from_google_sheets(sheet_url):
             return None
 
         # Обработка дат
+        # Сохраняем оригинальный столбец для повторных попыток парсинга
+        datasales_original = df['Datasales'].copy()
         date_formats = ['%d.%m.%Y', '%d/%m/%Y', '%Y-%m-%d', '%d-%m-%Y', '%d.%m.%y', '%d/%m/%y']
         df['Datasales'] = pd.to_datetime(df['Datasales'], errors='coerce')
 
         if df['Datasales'].isna().all():
             for fmt in date_formats:
                 try:
-                    df['Datasales'] = pd.to_datetime(df['Datasales'], format=fmt, errors='coerce')
+                    # Применяем формат к ОРИГИНАЛЬНЫМ строковым значениям
+                    df['Datasales'] = pd.to_datetime(datasales_original, format=fmt, errors='coerce')
                     if not df['Datasales'].isna().all():
                         break
                 except:
@@ -101,6 +117,11 @@ def load_data_from_google_sheets(sheet_url):
 
         # Очистка данных
         df = df.dropna(subset=['Art', 'Magazin', 'Segment', 'Datasales'])
+
+        # Проверка, остались ли данные после очистки
+        if df.empty:
+            st.error("После обработки не осталось валидных данных. Проверьте формат данных в таблице.")
+            return None
 
         # Конвертация числовых колонок
         for col in ['Qty', 'Price', 'Sum']:
@@ -110,6 +131,11 @@ def load_data_from_google_sheets(sheet_url):
         df = df[df['Qty'] > 0]  # Только положительные продажи
         df = df[df['Price'] > 0]  # Только положительные цены
         df = df.drop_duplicates()
+
+        # Проверка после фильтрации
+        if df.empty:
+            st.error("После фильтрации не осталось данных. Проверьте, что в таблице есть записи с положительными Qty и Price.")
+            return None
 
         # Добавление временных признаков
         df['Month'] = df['Datasales'].dt.month
