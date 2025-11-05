@@ -906,7 +906,7 @@ def main():
         # Поле для ввода URL
         sheet_url = st.text_input(
             "URL Google Sheets:",
-            placeholder="https://docs.google.com/spreadsheets/d/YOUR_SHEET_ID/edit",
+            value="https://docs.google.com/spreadsheets/d/1lJLON5N_EKQ5ICv0Pprp5DamP1tNAhBIph4uEoWC04Q/edit?gid=64159818#gid=64159818",
             help="Таблица должна быть открыта для просмотра (публичный доступ)"
         )
 
